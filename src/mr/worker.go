@@ -1,10 +1,12 @@
 package mr
 
-import "fmt"
-import "log"
-import "net/rpc"
-import "hash/fnv"
-
+import (
+	"fmt"
+	"hash/fnv"
+	"log"
+	"net/rpc"
+	"time"
+)
 
 //
 // Map functions return a slice of KeyValue.
@@ -24,7 +26,6 @@ func ihash(key string) int {
 	return int(h.Sum32() & 0x7fffffff)
 }
 
-
 //
 // main/mrworker.go calls this function.
 //
@@ -35,7 +36,24 @@ func Worker(mapf func(string, string) []KeyValue,
 
 	// uncomment to send the Example RPC to the master.
 	// CallExample()
+	id := register()
+	fmt.Println("Assigned id is ", id)
+	time.Sleep(10 * time.Second)
+}
 
+func register() int {
+	id := -1
+	call("Master.Heartbeat", -1, &id)
+	go func(id int) {
+		reply := 0
+		for {
+			call("Master.Heartbeat", id, &reply)
+			if reply != 0 {
+				return
+			}
+		}
+	}(id)
+	return id
 }
 
 //

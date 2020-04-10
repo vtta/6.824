@@ -1,15 +1,24 @@
 package mr
 
-import "log"
-import "net"
-import "os"
-import "net/rpc"
-import "net/http"
+import (
+	"log"
+	"net"
+	"net/http"
+	"net/rpc"
+	"os"
+	"sync/atomic"
+	"time"
+)
 
+type WorkerState struct {
+	state string
+	alive chan bool
+}
 
 type Master struct {
-	// Your definitions here.
-
+	uniqueIdCounter int64
+	workers         map[int]*WorkerState
+	done            bool
 }
 
 // Your code here -- RPC handlers for the worker to call.
@@ -23,7 +32,6 @@ func (m *Master) Example(args *ExampleArgs, reply *ExampleReply) error {
 	reply.Y = args.X + 1
 	return nil
 }
-
 
 //
 // start a thread that listens for RPCs from worker.go
@@ -50,8 +58,47 @@ func (m *Master) Done() bool {
 
 	// Your code here.
 
-
 	return ret
+}
+
+// generate a unique id for worker
+func (m *Master) uniqueId() int {
+	ret := int(m.uniqueIdCounter)
+	atomic.AddInt64(&m.uniqueIdCounter, 1)
+	return ret
+}
+
+// check for worker timeout
+func (m *Master) watchDog() {
+	for !m.done {
+		for k, v := range m.workers {
+			select {
+			case <-v.alive:
+				break
+			default:
+				delete(m.workers, k)
+				log.Print("Deleted timeout worker ", k)
+			}
+		}
+		time.Sleep(time.Second)
+	}
+}
+
+// Let master to know a worker is alive
+// A unique worker id would be assigned on the first heart beat
+// Subsequent heart beat require the worker to send id of itself
+func (m *Master) Heartbeat(workerId int, reply *int) error {
+	if workerId < 0 {
+		*reply = m.uniqueId()
+		workerId = *reply
+		m.workers[workerId] = &WorkerState{"idle", make(chan bool)}
+		log.Print("Registered new worker ", workerId)
+	} else {
+		*reply = 0
+	}
+	log.Print("Received heart beat from worker ", workerId)
+	m.workers[workerId].alive <- true
+	return nil
 }
 
 //
@@ -60,11 +107,11 @@ func (m *Master) Done() bool {
 // nReduce is the number of reduce tasks to use.
 //
 func MakeMaster(files []string, nReduce int) *Master {
-	m := Master{}
+	m := Master{0, map[int]*WorkerState{}, false}
 
 	// Your code here.
 
-
 	m.server()
+	go m.watchDog()
 	return &m
 }
