@@ -29,6 +29,7 @@ type Job struct {
 	Data   []FileSplit
 	Worker int
 	State  State
+	NReduce int
 }
 
 type JobKind int

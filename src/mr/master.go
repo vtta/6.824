@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/rpc"
 	"os"
+	"sync"
 	"sync/atomic"
 	"time"
 )
@@ -43,6 +44,7 @@ type WorkerPeer struct {
 }
 
 type Master struct {
+	mu sync.Mutex
 	uniqueIdCounter int64
 	workers         map[int]*WorkerPeer
 	jobs            map[int]*Job
@@ -97,6 +99,7 @@ func (m *Master) uniqueId() int {
 // check for worker timeout
 func (m *Master) watchDog() {
 	for !m.done {
+		m.mu.Lock()
 		for k, v := range m.workers {
 			select {
 			case <-v.alive:
@@ -110,7 +113,8 @@ func (m *Master) watchDog() {
 				log.Println("Deleted timeout worker", k)
 			}
 		}
-		time.Sleep(time.Second)
+		m.mu.Unlock()
+		time.Sleep(50 * time.Millisecond)
 	}
 }
 
@@ -123,6 +127,7 @@ func (m *Master) Heartbeat(args HeartbeatArgs, reply *HeartbeatReply) error {
 		reply.Shutdown = true
 		return nil
 	}
+	m.mu.Lock()
 	var workerId int
 	if args.WorkerId < 0 {
 		// new worker registration
@@ -143,9 +148,8 @@ func (m *Master) Heartbeat(args HeartbeatArgs, reply *HeartbeatReply) error {
 			log.Printf("Job %v has completed by worker %v\n", jobId, workerId)
 		}
 	}
-	log.Println("Received heartbeat from worker", workerId)
+	//log.Println("Received heartbeat from worker", workerId)
 	worker := m.workers[workerId]
-	worker.alive <- true
 	if worker.state != INPROGRESS {
 		job := m.pendingJob()
 		if job != nil {
@@ -157,6 +161,8 @@ func (m *Master) Heartbeat(args HeartbeatArgs, reply *HeartbeatReply) error {
 			log.Printf("Assigned %v task %v on %v to worker %v\n", worker.job.Kind, worker.job.Id, worker.job.Data, workerId)
 		}
 	}
+	m.mu.Unlock()
+	worker.alive <- true
 	// log.Println("Sent reply", reply)
 	return nil
 }
@@ -193,7 +199,7 @@ func (m *Master) pendingJob() *Job {
 		m.done = true
 	}
 	log.Println("Reduce phase has been completed")
-	log.Println("Whole MapReduce program has been completed")
+	//log.Println("Whole MapReduce program has been completed")
 	return nil
 }
 
@@ -203,16 +209,16 @@ func (m *Master) pendingJob() *Job {
 // nReduce is the number of reduce tasks to use.
 //
 func MakeMaster(files []string, nReduce int) *Master {
-	m := Master{0, map[int]*WorkerPeer{}, map[int]*Job{}, []int{}, []int{}, false}
+	m := Master{sync.Mutex{},int64(nReduce), map[int]*WorkerPeer{}, map[int]*Job{}, []int{}, []int{}, false}
 	for _, file := range files {
 		jobId := m.uniqueId()
 		m.mapJobIds = append(m.mapJobIds, jobId)
 		m.jobs[jobId] = &Job{
-			jobId, JK_MAP, []FileSplit{{file, 0}}, -1, IDLE,
+			jobId, JK_MAP, []FileSplit{{file, 0}}, -1, IDLE, nReduce,
 		}
 	}
-	for i := 0; i < len(files); i += 1 {
-		jobId := m.uniqueId()
+	for i := 0; i < nReduce; i += 1 {
+		jobId := i
 		m.reduceJobIds = append(m.reduceJobIds, jobId)
 		data := []FileSplit{}
 		for _, j := range m.mapJobIds {
@@ -221,9 +227,15 @@ func MakeMaster(files []string, nReduce int) *Master {
 			data = append(data, FileSplit{fmt.Sprintf("mr-%v-%v", j, i), 0})
 		}
 		m.jobs[jobId] = &Job{
-			jobId, JK_REDUCE, data, -1, IDLE,
+			jobId, JK_REDUCE, data, -1, IDLE, nReduce,
 		}
 	}
+	//for k, v := range m.jobs {
+	//	log.Println(k, v)
+	//}
+	//log.Println("mapJobIds", m.mapJobIds)
+	//log.Println("reduceJobIds", m.reduceJobIds)
+
 	m.server()
 	go m.watchDog()
 
