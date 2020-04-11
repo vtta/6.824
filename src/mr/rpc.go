@@ -9,6 +9,33 @@ package mr
 import "os"
 import "strconv"
 
+// Add your RPC definitions here.
+type HeartbeatArgs struct {
+	WorkerId int
+	State    State
+}
+
+type HeartbeatReply struct {
+	WorkerId int
+	Shutdown bool
+	Jobs     []Job
+}
+
+type Job struct {
+	Id int
+	// map or reduce
+	Kind string
+	// partitions of data files
+	Data   []FileSplit
+	Worker int
+	State  State
+}
+
+type FileSplit struct {
+	Name   string
+	Offset int64
+}
+
 //
 // example to show how to declare the arguments
 // and reply for an RPC.
@@ -20,18 +47,6 @@ type ExampleArgs struct {
 
 type ExampleReply struct {
 	Y int
-}
-
-// Add your RPC definitions here.
-type HeartbeatArgs struct {
-	WorkerId    int
-	StateUpdate string
-}
-
-type HeartbeatReply struct {
-	WorkerId int
-	Shutdown bool
-	Jobs     []Job
 }
 
 // Cook up a unique-ish UNIX-domain socket name

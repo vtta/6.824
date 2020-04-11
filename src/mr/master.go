@@ -10,16 +10,29 @@ import (
 	"time"
 )
 
+type State int
+
+const (
+	UNCHANGED   State = 0
+	IDLE        State = 1
+	IN_PROGRESS State = 2
+	COMPLETED   State = 3
+)
+
 type WorkerPeer struct {
-	state string
+	id    int
+	state State
 	alive chan bool
+	job   *Job
 }
 
 type Master struct {
 	uniqueIdCounter int64
 	workers         map[int]*WorkerPeer
+	jobs            map[int]*Job
+	mapJobIds       []int
+	reduceJobIds    []int
 	done            bool
-	jobs            []Job
 }
 
 // Your code here -- RPC handlers for the worker to call.
@@ -62,7 +75,7 @@ func (m *Master) Done() bool {
 	return ret
 }
 
-// generate a unique id for worker
+// generate a unique id for a worker or a job
 func (m *Master) uniqueId() int {
 	ret := int(m.uniqueIdCounter)
 	atomic.AddInt64(&m.uniqueIdCounter, 1)
@@ -99,25 +112,64 @@ func (m *Master) Heartbeat(args HeartbeatArgs, reply *HeartbeatReply) error {
 		// new worker registration
 		id = m.uniqueId()
 		reply.WorkerId = id
-		m.workers[id] = &WorkerPeer{"idle", make(chan bool)}
+		m.workers[id] = &WorkerPeer{id, IDLE, make(chan bool), nil}
 		log.Println("Registered new worker", id)
 	} else {
 		// known worker
 		id = args.WorkerId
-		state := args.StateUpdate
-		if state != "" {
-			m.workers[id].state = state
+		newState := args.State
+		if newState != UNCHANGED {
+			m.workers[id].state = newState
+		}
+		if newState == COMPLETED {
+			m.jobs[m.workers[id].job.Id].State = COMPLETED
 		}
 	}
 	log.Println("Received heart beat from worker", id)
 	worker := m.workers[id]
 	worker.alive <- true
-	if len(m.jobs) > 0 && worker.state != "in-progress" {
-		job := m.jobs[0]
-		m.jobs = m.jobs[1:]
-		reply.Jobs = append(reply.Jobs, job)
-		worker.state = "in-progress"
-		log.Printf("Assigned %v task on %v to worker %v\n", job.Kind, job.File, id)
+	if worker.state != IN_PROGRESS {
+		job := m.pendingJob()
+		if job != nil {
+			job.State = IN_PROGRESS
+			worker.job = job
+			reply.Jobs = append(reply.Jobs, *worker.job)
+			worker.state = IN_PROGRESS
+			log.Printf("Assigned %v task on %v to worker %v\n", worker.job.Kind, worker.job.Data, id)
+		}
+	}
+	return nil
+}
+
+// find a available job to assign
+// treat map and reduce as two non-overlapping phase
+// only assign reduce jobs after map phase finished
+func (m *Master) pendingJob() *Job {
+	mapFinished := true
+	for _, v := range m.mapJobIds {
+		state := m.jobs[v].State
+		if state == IDLE {
+			return m.jobs[v]
+		}
+		if state != COMPLETED {
+			mapFinished = false
+		}
+	}
+	if !mapFinished {
+		return nil
+	}
+	reduceFinished := true
+	for _, v := range m.reduceJobIds {
+		state := m.jobs[v].State
+		if state == IDLE {
+			return m.jobs[v]
+		}
+		if state != COMPLETED {
+			reduceFinished = false
+		}
+	}
+	if reduceFinished {
+		// m.done = true
 	}
 	return nil
 }
@@ -128,7 +180,7 @@ func (m *Master) Heartbeat(args HeartbeatArgs, reply *HeartbeatReply) error {
 // nReduce is the number of reduce tasks to use.
 //
 func MakeMaster(files []string, nReduce int) *Master {
-	m := Master{0, map[int]*WorkerPeer{}, false, []Job{}}
+	m := Master{0, map[int]*WorkerPeer{}, map[int]*Job{}, []int{}, []int{}, false}
 	//nMap := 10 * nReduce
 
 	// Your code here.

@@ -29,16 +29,11 @@ func ihash(key string) int {
 type MapFn func(string, string) []KeyValue
 type ReduceFn func(string, []string) string
 
-type Job struct {
-	Kind string
-	File string
-}
-
-func doMap(fn MapFn, file string) {
+func doMap(fn MapFn, data []FileSplit) {
 
 }
 
-func doReduce(fn ReduceFn, file string) {
+func doReduce(fn ReduceFn, data []FileSplit) {
 
 }
 
@@ -46,7 +41,7 @@ func doReduce(fn ReduceFn, file string) {
 // main/mrworker.go calls this function.
 //
 func Worker(mapfn MapFn, reducefn ReduceFn) {
-	args := HeartbeatArgs{-1, "idle"}
+	args := HeartbeatArgs{-1, IDLE}
 	reply := HeartbeatReply{}
 	call("Master.Heartbeat", args, &reply)
 	workerId := reply.WorkerId
@@ -60,9 +55,9 @@ func Worker(mapfn MapFn, reducefn ReduceFn) {
 		for {
 			select {
 			case <-done:
-				args = HeartbeatArgs{workerId, "completed"}
+				args = HeartbeatArgs{workerId, COMPLETED}
 			default:
-				args = HeartbeatArgs{workerId, ""}
+				args = HeartbeatArgs{workerId, UNCHANGED}
 			}
 			call("Master.Heartbeat", args, &reply)
 			go func() {
@@ -82,9 +77,9 @@ func Worker(mapfn MapFn, reducefn ReduceFn) {
 			case job := <-jobs:
 				switch job.Kind {
 				case "map":
-					doMap(mapfn, job.File)
+					doMap(mapfn, job.Data)
 				case "reduce":
-					doReduce(reducefn, job.File)
+					doReduce(reducefn, job.Data)
 				}
 				done <- true
 			default:
