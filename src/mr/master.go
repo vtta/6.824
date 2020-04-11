@@ -1,6 +1,7 @@
 package mr
 
 import (
+	"fmt"
 	"log"
 	"net"
 	"net/http"
@@ -18,6 +19,21 @@ const (
 	IN_PROGRESS State = 2
 	COMPLETED   State = 3
 )
+
+func (s State) String() string {
+	switch s {
+	case UNCHANGED:
+		return "unchanged"
+	case IDLE:
+		return "idle"
+	case IN_PROGRESS:
+		return "in-progress"
+	case COMPLETED:
+		return "completed"
+	default:
+		panic(s)
+	}
+}
 
 type WorkerPeer struct {
 	id    int
@@ -68,11 +84,7 @@ func (m *Master) server() {
 // if the entire job has finished.
 //
 func (m *Master) Done() bool {
-	ret := false
-
-	// Your code here.
-
-	return ret
+	return m.done
 }
 
 // generate a unique id for a worker or a job
@@ -107,35 +119,38 @@ func (m *Master) Heartbeat(args HeartbeatArgs, reply *HeartbeatReply) error {
 		reply.Shutdown = true
 		return nil
 	}
-	var id int
+	var workerId int
 	if args.WorkerId < 0 {
 		// new worker registration
-		id = m.uniqueId()
-		reply.WorkerId = id
-		m.workers[id] = &WorkerPeer{id, IDLE, make(chan bool), nil}
-		log.Println("Registered new worker", id)
+		workerId = m.uniqueId()
+		reply.WorkerId = workerId
+		m.workers[workerId] = &WorkerPeer{workerId, IDLE, make(chan bool), nil}
+		log.Println("Registered new worker", workerId)
 	} else {
 		// known worker
-		id = args.WorkerId
+		workerId = args.WorkerId
 		newState := args.State
 		if newState != UNCHANGED {
-			m.workers[id].state = newState
+			m.workers[workerId].state = newState
 		}
 		if newState == COMPLETED {
-			m.jobs[m.workers[id].job.Id].State = COMPLETED
+			jobId := m.workers[workerId].job.Id
+			m.jobs[jobId].State = COMPLETED
+			log.Printf("Job %v has completed by worker %v\n", jobId, workerId)
 		}
 	}
-	log.Println("Received heart beat from worker", id)
-	worker := m.workers[id]
+	log.Println("Received heart beat from worker", workerId)
+	worker := m.workers[workerId]
 	worker.alive <- true
 	if worker.state != IN_PROGRESS {
 		job := m.pendingJob()
 		if job != nil {
 			job.State = IN_PROGRESS
+			job.Worker = workerId
 			worker.job = job
 			reply.Jobs = append(reply.Jobs, *worker.job)
 			worker.state = IN_PROGRESS
-			log.Printf("Assigned %v task on %v to worker %v\n", worker.job.Kind, worker.job.Data, id)
+			log.Printf("Assigned %v task %v on %v to worker %v\n", worker.job.Kind, worker.job.Id, worker.job.Data, workerId)
 		}
 	}
 	return nil
@@ -158,6 +173,7 @@ func (m *Master) pendingJob() *Job {
 	if !mapFinished {
 		return nil
 	}
+	log.Println("Map phase has been completed")
 	reduceFinished := true
 	for _, v := range m.reduceJobIds {
 		state := m.jobs[v].State
@@ -169,8 +185,10 @@ func (m *Master) pendingJob() *Job {
 		}
 	}
 	if reduceFinished {
-		// m.done = true
+		m.done = true
 	}
+	log.Println("Reduce phase has been completed")
+	log.Println("Whole MapReduce program has been completed")
 	return nil
 }
 
@@ -181,10 +199,26 @@ func (m *Master) pendingJob() *Job {
 //
 func MakeMaster(files []string, nReduce int) *Master {
 	m := Master{0, map[int]*WorkerPeer{}, map[int]*Job{}, []int{}, []int{}, false}
-	//nMap := 10 * nReduce
-
-	// Your code here.
-
+	for _, file := range files {
+		jobId := m.uniqueId()
+		m.mapJobIds = append(m.mapJobIds, jobId)
+		m.jobs[jobId] = &Job{
+			jobId, JK_MAP, []FileSplit{{file, 0}}, -1, IDLE,
+		}
+	}
+	for i := 0; i < len(files); i += 1 {
+		jobId := m.uniqueId()
+		m.reduceJobIds = append(m.reduceJobIds, jobId)
+		data := []FileSplit{}
+		for _, j := range m.mapJobIds {
+			// naming convention for intermediate files: "mr-X-Y"
+			// where X is the Map jobId, and Y is the reduce jobId
+			data = append(data, FileSplit{fmt.Sprintf("mr-%v-%v", j, i), 0})
+		}
+		m.jobs[jobId] = &Job{
+			jobId, JK_MAP, data, -1, IDLE,
+		}
+	}
 	m.server()
 	go m.watchDog()
 

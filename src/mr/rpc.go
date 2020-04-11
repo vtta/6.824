@@ -24,11 +24,29 @@ type HeartbeatReply struct {
 type Job struct {
 	Id int
 	// map or reduce
-	Kind string
+	Kind JobKind
 	// partitions of data files
 	Data   []FileSplit
 	Worker int
 	State  State
+}
+
+type JobKind int
+
+const (
+	JK_MAP    JobKind = 0
+	JK_REDUCE JobKind = 1
+)
+
+func (k JobKind) String() string {
+	switch k {
+	case JK_MAP:
+		return "map"
+	case JK_REDUCE:
+		return "reduce"
+	default:
+		panic(k)
+	}
 }
 
 type FileSplit struct {

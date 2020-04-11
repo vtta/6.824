@@ -76,9 +76,9 @@ func Worker(mapfn MapFn, reducefn ReduceFn) {
 			select {
 			case job := <-jobs:
 				switch job.Kind {
-				case "map":
+				case JK_MAP:
 					doMap(mapfn, job.Data)
-				case "reduce":
+				case JK_REDUCE:
 					doReduce(reducefn, job.Data)
 				}
 				done <- true
