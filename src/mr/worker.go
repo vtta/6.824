@@ -26,34 +26,73 @@ func ihash(key string) int {
 	return int(h.Sum32() & 0x7fffffff)
 }
 
+type MapFn func(string, string) []KeyValue
+type ReduceFn func(string, []string) string
+
+type Job struct {
+	Kind string
+	File string
+}
+
+func doMap(fn MapFn, file string) {
+
+}
+
+func doReduce(fn ReduceFn, file string) {
+
+}
+
 //
 // main/mrworker.go calls this function.
 //
-func Worker(mapf func(string, string) []KeyValue,
-	reducef func(string, []string) string) {
-
-	// Your worker implementation here.
-
-	// uncomment to send the Example RPC to the master.
-	// CallExample()
-	id := register()
-	fmt.Println("Assigned id is ", id)
-	time.Sleep(10 * time.Second)
-}
-
-func register() int {
-	id := -1
-	call("Master.Heartbeat", -1, &id)
-	go func(id int) {
-		reply := 0
+func Worker(mapfn MapFn, reducefn ReduceFn) {
+	args := HeartbeatArgs{-1, "idle"}
+	reply := HeartbeatReply{}
+	call("Master.Heartbeat", args, &reply)
+	workerId := reply.WorkerId
+	jobs := make(chan Job)
+	done := make(chan bool)
+	shutdown := make(chan bool)
+	// heartbeat thread
+	go func() {
+		args := HeartbeatArgs{}
+		reply := HeartbeatReply{}
 		for {
-			call("Master.Heartbeat", id, &reply)
-			if reply != 0 {
-				return
+			select {
+			case <-done:
+				args = HeartbeatArgs{workerId, "completed"}
+			default:
+				args = HeartbeatArgs{workerId, ""}
+			}
+			call("Master.Heartbeat", args, &reply)
+			go func() {
+				for _, v := range reply.Jobs {
+					jobs <- v
+				}
+			}()
+			if reply.Shutdown {
+				shutdown <- true
 			}
 		}
-	}(id)
-	return id
+	}()
+	// pulling for job, if none wait for a heartbeat and try again
+	go func() {
+		for {
+			select {
+			case job := <-jobs:
+				switch job.Kind {
+				case "map":
+					doMap(mapfn, job.File)
+				case "reduce":
+					doReduce(reducefn, job.File)
+				}
+				done <- true
+			default:
+				time.Sleep(time.Second)
+			}
+		}
+	}()
+	<-shutdown
 }
 
 //

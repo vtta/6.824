@@ -10,15 +10,16 @@ import (
 	"time"
 )
 
-type WorkerState struct {
+type WorkerPeer struct {
 	state string
 	alive chan bool
 }
 
 type Master struct {
 	uniqueIdCounter int64
-	workers         map[int]*WorkerState
+	workers         map[int]*WorkerPeer
 	done            bool
+	jobs            []Job
 }
 
 // Your code here -- RPC handlers for the worker to call.
@@ -77,7 +78,7 @@ func (m *Master) watchDog() {
 				break
 			default:
 				delete(m.workers, k)
-				log.Print("Deleted timeout worker ", k)
+				log.Println("Deleted timeout worker", k)
 			}
 		}
 		time.Sleep(time.Second)
@@ -87,17 +88,37 @@ func (m *Master) watchDog() {
 // Let master to know a worker is alive
 // A unique worker id would be assigned on the first heart beat
 // Subsequent heart beat require the worker to send id of itself
-func (m *Master) Heartbeat(workerId int, reply *int) error {
-	if workerId < 0 {
-		*reply = m.uniqueId()
-		workerId = *reply
-		m.workers[workerId] = &WorkerState{"idle", make(chan bool)}
-		log.Print("Registered new worker ", workerId)
-	} else {
-		*reply = 0
+func (m *Master) Heartbeat(args HeartbeatArgs, reply *HeartbeatReply) error {
+	*reply = HeartbeatReply{args.WorkerId, false, []Job{}}
+	if m.done {
+		reply.Shutdown = true
+		return nil
 	}
-	log.Print("Received heart beat from worker ", workerId)
-	m.workers[workerId].alive <- true
+	var id int
+	if args.WorkerId < 0 {
+		// new worker registration
+		id = m.uniqueId()
+		reply.WorkerId = id
+		m.workers[id] = &WorkerPeer{"idle", make(chan bool)}
+		log.Println("Registered new worker", id)
+	} else {
+		// known worker
+		id = args.WorkerId
+		state := args.StateUpdate
+		if state != "" {
+			m.workers[id].state = state
+		}
+	}
+	log.Println("Received heart beat from worker", id)
+	worker := m.workers[id]
+	worker.alive <- true
+	if len(m.jobs) > 0 && worker.state != "in-progress" {
+		job := m.jobs[0]
+		m.jobs = m.jobs[1:]
+		reply.Jobs = append(reply.Jobs, job)
+		worker.state = "in-progress"
+		log.Printf("Assigned %v task on %v to worker %v\n", job.Kind, job.File, id)
+	}
 	return nil
 }
 
@@ -107,11 +128,13 @@ func (m *Master) Heartbeat(workerId int, reply *int) error {
 // nReduce is the number of reduce tasks to use.
 //
 func MakeMaster(files []string, nReduce int) *Master {
-	m := Master{0, map[int]*WorkerState{}, false}
+	m := Master{0, map[int]*WorkerPeer{}, false, []Job{}}
+	//nMap := 10 * nReduce
 
 	// Your code here.
 
 	m.server()
 	go m.watchDog()
+
 	return &m
 }

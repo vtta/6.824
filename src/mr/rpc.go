@@ -23,6 +23,16 @@ type ExampleReply struct {
 }
 
 // Add your RPC definitions here.
+type HeartbeatArgs struct {
+	WorkerId    int
+	StateUpdate string
+}
+
+type HeartbeatReply struct {
+	WorkerId int
+	Shutdown bool
+	Jobs     []Job
+}
 
 // Cook up a unique-ish UNIX-domain socket name
 // in /var/tmp, for the master.
