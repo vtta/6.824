@@ -8,33 +8,8 @@ import (
 	"net/rpc"
 	"os"
 	"sync"
-	"sync/atomic"
 	"time"
 )
-
-type State int
-
-const (
-	UNCHANGED  State = 0
-	IDLE       State = 1
-	INPROGRESS State = 2
-	COMPLETED  State = 3
-)
-
-func (s State) String() string {
-	switch s {
-	case UNCHANGED:
-		return "unchanged"
-	case IDLE:
-		return "idle"
-	case INPROGRESS:
-		return "in-progress"
-	case COMPLETED:
-		return "completed"
-	default:
-		panic(s)
-	}
-}
 
 type WorkerPeer struct {
 	id    int
@@ -44,25 +19,13 @@ type WorkerPeer struct {
 }
 
 type Master struct {
-	mu sync.Mutex
+	mu              sync.Mutex
 	uniqueIdCounter int64
 	workers         map[int]*WorkerPeer
 	jobs            map[int]*Job
 	mapJobIds       []int
 	reduceJobIds    []int
 	done            bool
-}
-
-// Your code here -- RPC handlers for the worker to call.
-
-//
-// an example RPC handler.
-//
-// the RPC argument and reply types are defined in rpc.go.
-//
-func (m *Master) Example(args *ExampleArgs, reply *ExampleReply) error {
-	reply.Y = args.X + 1
-	return nil
 }
 
 //
@@ -87,13 +50,6 @@ func (m *Master) server() {
 //
 func (m *Master) Done() bool {
 	return m.done
-}
-
-// generate a unique id for a worker or a job
-func (m *Master) uniqueId() int {
-	ret := int(m.uniqueIdCounter)
-	atomic.AddInt64(&m.uniqueIdCounter, 1)
-	return ret
 }
 
 // check for worker timeout
@@ -131,7 +87,7 @@ func (m *Master) Heartbeat(args HeartbeatArgs, reply *HeartbeatReply) error {
 	var workerId int
 	if args.WorkerId < 0 {
 		// new worker registration
-		workerId = m.uniqueId()
+		workerId = uniqueId()
 		reply.WorkerId = workerId
 		m.workers[workerId] = &WorkerPeer{workerId, IDLE, make(chan bool), nil}
 		log.Println("Registered new worker", workerId)
@@ -209,9 +165,9 @@ func (m *Master) pendingJob() *Job {
 // nReduce is the number of reduce tasks to use.
 //
 func MakeMaster(files []string, nReduce int) *Master {
-	m := Master{sync.Mutex{},int64(nReduce), map[int]*WorkerPeer{}, map[int]*Job{}, []int{}, []int{}, false}
+	m := Master{sync.Mutex{}, int64(nReduce), map[int]*WorkerPeer{}, map[int]*Job{}, []int{}, []int{}, false}
 	for _, file := range files {
-		jobId := m.uniqueId()
+		jobId := uniqueId()
 		m.mapJobIds = append(m.mapJobIds, jobId)
 		m.jobs[jobId] = &Job{
 			jobId, JK_MAP, []FileSplit{{file, 0}}, -1, IDLE, nReduce,

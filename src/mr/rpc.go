@@ -6,10 +6,28 @@ package mr
 // remember to capitalize all names.
 //
 
-import "os"
+import (
+	"bytes"
+	"encoding/gob"
+	"fmt"
+	"hash/fnv"
+	"log"
+	"net/rpc"
+	"os"
+)
 import "strconv"
 
-// Add your RPC definitions here.
+type MapFn func(string, string) []KeyValue
+type ReduceFn func(string, []string) string
+
+//
+// Map functions return a slice of KeyValue.
+//
+type KeyValue struct {
+	Key   string
+	Value string
+}
+
 type HeartbeatArgs struct {
 	WorkerId int
 	State    State
@@ -26,10 +44,15 @@ type Job struct {
 	// map or reduce
 	Kind JobKind
 	// partitions of data files
-	Data   []FileSplit
-	Worker int
-	State  State
+	Data    []FileSplit
+	Worker  int
+	State   State
 	NReduce int
+}
+
+type FileSplit struct {
+	Name   string
+	Offset int64
 }
 
 type JobKind int
@@ -50,22 +73,28 @@ func (k JobKind) String() string {
 	}
 }
 
-type FileSplit struct {
-	Name   string
-	Offset int64
-}
+type State int
 
-//
-// example to show how to declare the arguments
-// and reply for an RPC.
-//
+const (
+	UNCHANGED  State = 0
+	IDLE       State = 1
+	INPROGRESS State = 2
+	COMPLETED  State = 3
+)
 
-type ExampleArgs struct {
-	X int
-}
-
-type ExampleReply struct {
-	Y int
+func (s State) String() string {
+	switch s {
+	case UNCHANGED:
+		return "unchanged"
+	case IDLE:
+		return "idle"
+	case INPROGRESS:
+		return "in-progress"
+	case COMPLETED:
+		return "completed"
+	default:
+		panic(s)
+	}
 }
 
 // Cook up a unique-ish UNIX-domain socket name
@@ -76,4 +105,70 @@ func masterSock() string {
 	s := "/var/tmp/824-mr-"
 	s += strconv.Itoa(os.Getuid())
 	return s
+}
+
+//
+// use ihash(key) % NReduce to choose the reduce
+// task number for each KeyValue emitted by Map.
+//
+func ihash(key string) int {
+	h := fnv.New32a()
+	h.Write([]byte(key))
+	return int(h.Sum32() & 0x7fffffff)
+}
+
+//
+// send an RPC request to the master, wait for the response.
+// usually returns true.
+// returns false if something goes wrong.
+//
+func call(rpcname string, args interface{}, reply interface{}) bool {
+	// c, err := rpc.DialHTTP("tcp", "127.0.0.1"+":1234")
+	sockname := masterSock()
+	c, err := rpc.DialHTTP("unix", sockname)
+	if err != nil {
+		log.Fatal("dialing:", err)
+	}
+	defer c.Close()
+
+	err = c.Call(rpcname, args, reply)
+	if err == nil {
+		return true
+	}
+
+	fmt.Println(err)
+	return false
+}
+
+func counter() (f func() int) {
+	i := 0
+	return func() int {
+		i += 1
+		return i
+	}
+}
+
+// generate a unique id for a worker or a job
+var uniqueId = counter()
+
+func encode(kvs []KeyValue) []byte {
+	buf := bytes.Buffer{}
+	encoder := gob.NewEncoder(&buf)
+	err := encoder.Encode(&kvs)
+	if err != nil {
+		log.Fatalln("cannot encode intermediate result", err)
+	}
+	return buf.Bytes()
+}
+
+func decode(b []byte) []KeyValue {
+	buf := bytes.Buffer{}
+	buf.Write(b)
+	decoder := gob.NewDecoder(&buf)
+	kvs := []KeyValue{}
+	err := decoder.Decode(&kvs)
+	if err != nil {
+		log.Fatalln("cannot decode intermediate result", err)
+	}
+	return kvs
 }
