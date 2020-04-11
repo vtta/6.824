@@ -9,7 +9,7 @@ import (
 )
 
 func doMap(fn MapFn, data []FileSplit, nReduce int, mapId int) {
-	log.Printf("Begining execution of map job %v\n", mapId)
+	log.Printf("Begining execution of map Job %v\n", mapId)
 	for _, split := range data {
 		file, err := os.Open(split.Name)
 		if err != nil {
@@ -44,12 +44,12 @@ func doMap(fn MapFn, data []FileSplit, nReduce int, mapId int) {
 			}
 		}
 	}
-	log.Printf("Finished execution of map job %v\n", mapId)
+	log.Printf("Finished execution of map Job %v\n", mapId)
 
 }
 
 func doReduce(fn ReduceFn, data []FileSplit, reduceId int) {
-	log.Printf("Begining execution of reduce job %v\n", reduceId)
+	log.Printf("Begining execution of reduce Job %v\n", reduceId)
 	//log.Println(data, reduceId)
 	intermediate := map[string][]string{}
 	for _, split := range data {
@@ -80,65 +80,49 @@ func doReduce(fn ReduceFn, data []FileSplit, reduceId int) {
 	if err != nil {
 		log.Fatalln("cannot close", filename)
 	}
-	log.Printf("Finished execution of reduce job %v\n", reduceId)
+	log.Printf("Finished execution of reduce Job %v\n", reduceId)
 
+}
+
+func callRegister() int {
+	reply := WorkerRegisterReply{}
+	call("Master.WorkerRegister", WorkerRegisterArgs{}, &reply)
+	return reply.WorkerId
 }
 
 //
 // main/mrworker.go calls this function.
 //
 func Worker(mapfn MapFn, reducefn ReduceFn) {
-	jobs := make(chan Job)
-	done := make(chan bool)
+	workerId := callRegister()
 	shutdown := make(chan bool)
-	handleAssignedJob := func(reply HeartbeatReply) {
-		// log.Println("Got reply", reply)
-		for _, v := range reply.Jobs {
-			//log.Printf("Received %v job %v on %v\n", v.Kind, v.Id, v.Data)
-			log.Printf("Received %v job %v\n", v.Kind, v.Id)
-		}
-		go func(reply HeartbeatReply) {
-			for _, v := range reply.Jobs {
-				jobs <- v
-			}
-		}(reply)
-	}
-	reply := HeartbeatReply{}
-	call("Master.Heartbeat", HeartbeatArgs{-1, IDLE}, &reply)
-	workerId := reply.WorkerId
-	log.Println("Registered with id", workerId)
-	handleAssignedJob(reply)
-	// heartbeat thread
-	go func() {
-		args := HeartbeatArgs{}
+	go func(shutdown chan<- bool) {
+		args := HeartbeatArgs{workerId}
 		reply := HeartbeatReply{}
 		for {
-			time.Sleep(50 * time.Millisecond)
-			select {
-			case <-done:
-				args = HeartbeatArgs{workerId, COMPLETED}
-			default:
-				args = HeartbeatArgs{workerId, UNCHANGED}
-			}
-			call("Master.Heartbeat", args, &reply)
-			handleAssignedJob(reply)
-			if reply.Shutdown {
+			ok := call("Master.Heartbeat", args, &reply)
+			if !ok || reply.Shutdown {
 				shutdown <- true
 				return
 			}
+			time.Sleep(100 * time.Millisecond)
 		}
-	}()
-	// pulling for job in a blocking style
+	}(shutdown)
 	go func() {
 		for {
-			job := <-jobs
-			switch job.Kind {
-			case JK_MAP:
-				doMap(mapfn, job.Data, job.NReduce, job.Id)
-			case JK_REDUCE:
-				doReduce(reducefn, job.Data, job.Id)
+			args := RequestJobArgs{workerId}
+			reply := RequestJobReply{}
+			call("Master.RequestJob", args, &reply)
+			if reply.HasJob {
+				switch reply.Job.Kind {
+				case JK_MAP:
+					doMap(mapfn, reply.Job.Data, reply.Job.NReduce, reply.Job.Id)
+				case JK_REDUCE:
+					doReduce(reducefn, reply.Job.Data, reply.Job.Id)
+				}
+			} else {
+				time.Sleep(100 * time.Millisecond)
 			}
-			done <- true
 		}
 	}()
 	<-shutdown

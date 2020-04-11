@@ -14,29 +14,39 @@ import (
 	"log"
 	"net/rpc"
 	"os"
+	"strconv"
 )
-import "strconv"
 
-type MapFn func(string, string) []KeyValue
-type ReduceFn func(string, []string) string
+type WorkerRegisterArgs struct {
+}
 
-//
-// Map functions return a slice of KeyValue.
-//
-type KeyValue struct {
-	Key   string
-	Value string
+type WorkerRegisterReply struct {
+	WorkerId int
 }
 
 type HeartbeatArgs struct {
 	WorkerId int
-	State    State
 }
 
 type HeartbeatReply struct {
-	WorkerId int
 	Shutdown bool
-	Jobs     []Job
+}
+
+type RequestJobArgs struct {
+	WorkerId int
+}
+
+type RequestJobReply struct {
+	HasJob bool
+	Job    Job
+}
+
+type MapFn func(string, string) []KeyValue
+type ReduceFn func(string, []string) string
+
+type KeyValue struct {
+	Key   string
+	Value string
 }
 
 type Job struct {
@@ -45,8 +55,6 @@ type Job struct {
 	Kind JobKind
 	// partitions of data files
 	Data    []FileSplit
-	Worker  int
-	State   State
 	NReduce int
 }
 
@@ -148,7 +156,7 @@ func counter() (f func() int) {
 	}
 }
 
-// generate a unique id for a worker or a job
+// generate a unique id for a worker or a Job
 var uniqueId = counter()
 
 func encode(kvs []KeyValue) []byte {

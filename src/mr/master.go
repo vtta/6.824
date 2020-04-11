@@ -11,21 +11,129 @@ import (
 	"time"
 )
 
-type WorkerPeer struct {
-	id    int
-	state State
-	alive chan bool
-	job   *Job
+type Master struct {
+	// immutable Job table
+	jobs map[int]*Job
+	mu   sync.Mutex
+	// need to be protected by mutex
+	mapState map[int]State
+	// only keep in-progress worker info
+	mapWorker   map[int]int
+	mapDone     bool
+	reduceState map[int]State
+	// only keep in-progress worker info
+	reduceWorker map[int]int
+	reduceDone   bool
+	workerTimer  map[int]*time.Timer
 }
 
-type Master struct {
-	mu              sync.Mutex
-	uniqueIdCounter int64
-	workers         map[int]*WorkerPeer
-	jobs            map[int]*Job
-	mapJobIds       []int
-	reduceJobIds    []int
-	done            bool
+func (m *Master) WorkerRegister(args WorkerRegisterArgs, reply *WorkerRegisterReply) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	worker := uniqueId()
+	*reply = WorkerRegisterReply{worker}
+	m.workerTimer[worker] = time.NewTimer(time.Second)
+	log.Printf("[--] [%02v] worker registered\n", worker)
+
+	// clean up guard
+	go func(worker int, timer <-chan time.Time) {
+		<-timer
+		log.Printf("[--] [%02v] worker disconnected\n", worker)
+		delete(m.workerTimer, worker)
+		m.mu.Lock()
+		defer m.mu.Unlock()
+		for jobId, workerId := range m.mapWorker {
+			if workerId == worker {
+				m.mapState[jobId] = IDLE
+				delete(m.mapWorker, jobId)
+				log.Printf("[%02v] [%02v] job state rolled back\n", jobId, worker)
+			}
+		}
+		for jobId, workerId := range m.reduceWorker {
+			if workerId == worker {
+				m.reduceState[jobId] = IDLE
+				delete(m.reduceWorker, jobId)
+				log.Printf("[%02v] [%02v] job state rolled back\n", jobId, worker)
+			}
+		}
+	}(worker, m.workerTimer[worker].C)
+	return nil
+}
+
+func (m *Master) Heartbeat(args HeartbeatArgs, reply *HeartbeatReply) error {
+	//log.Printf("[--] [%02v] heartbeat\n", args.WorkerId)
+	m.workerTimer[args.WorkerId].Reset(time.Second)
+	*reply = HeartbeatReply{m.Done()}
+	return nil
+}
+
+// ask for a new Job, this call indicates that all previous assigned jobs of this worker have been finished
+func (m *Master) RequestJob(args RequestJobArgs, reply *RequestJobReply) error {
+	worker := args.WorkerId
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for jobId, workerId := range m.mapWorker {
+		if workerId == worker {
+			m.mapState[jobId] = COMPLETED
+			delete(m.mapWorker, jobId)
+			log.Printf("[%02v] [%02v] Job finished\n", jobId, worker)
+		}
+	}
+	for jobId, workerId := range m.reduceWorker {
+		if workerId == worker {
+			m.reduceState[jobId] = COMPLETED
+			delete(m.reduceWorker, jobId)
+			log.Printf("[%02v] [%02v] Job finished\n", jobId, worker)
+		}
+	}
+	job := m.assignJob(worker)
+	if job != nil {
+		*reply = RequestJobReply{true, *job}
+		log.Printf("[%02v] [%02v] Job assigned\n", job.Id, worker)
+	} else {
+		*reply = RequestJobReply{false, Job{}}
+	}
+	return nil
+}
+
+// need to have the lock when call this function
+func (m *Master) assignJob(worker int) *Job {
+	if !m.mapDone {
+		mapFinished := true
+		for jobId, state := range m.mapState {
+			if state == IDLE {
+				m.mapState[jobId] = INPROGRESS
+				m.mapWorker[jobId] = worker
+				return m.jobs[jobId]
+			}
+			if state != COMPLETED {
+				mapFinished = false
+			}
+		}
+		if !mapFinished {
+			return nil
+		}
+		m.mapDone = true
+		log.Println("map phase has been completed")
+	}
+	if !m.reduceDone {
+		reduceFinished := true
+		for jobId, state := range m.reduceState {
+			if state == IDLE {
+				m.reduceState[jobId] = INPROGRESS
+				m.reduceWorker[jobId] = worker
+				return m.jobs[jobId]
+			}
+			if state != COMPLETED {
+				reduceFinished = false
+			}
+		}
+		if reduceFinished {
+			m.reduceDone = true
+			log.Println("reduce phase has been completed")
+		}
+	}
+	return nil
 }
 
 //
@@ -46,117 +154,10 @@ func (m *Master) server() {
 
 //
 // main/mrmaster.go calls Done() periodically to find out
-// if the entire job has finished.
+// if the entire Job has finished.
 //
 func (m *Master) Done() bool {
-	return m.done
-}
-
-// check for worker timeout
-func (m *Master) watchDog() {
-	for !m.done {
-		m.mu.Lock()
-		for k, v := range m.workers {
-			select {
-			case <-v.alive:
-				break
-			default:
-				if m.jobs[v.job.Id].State == INPROGRESS {
-					m.jobs[v.job.Id].State = IDLE
-					log.Printf("Reset %v job %v of timeout worker %v\n", v.job.Kind, v.job.Id, k)
-				}
-				delete(m.workers, k)
-				log.Println("Deleted timeout worker", k)
-			}
-		}
-		m.mu.Unlock()
-		time.Sleep(50 * time.Millisecond)
-	}
-}
-
-// Let master to know a worker is alive
-// A unique worker id would be assigned on the first heart beat
-// Subsequent heart beat require the worker to send id of itself
-func (m *Master) Heartbeat(args HeartbeatArgs, reply *HeartbeatReply) error {
-	*reply = HeartbeatReply{args.WorkerId, false, []Job{}}
-	if m.done {
-		reply.Shutdown = true
-		return nil
-	}
-	m.mu.Lock()
-	var workerId int
-	if args.WorkerId < 0 {
-		// new worker registration
-		workerId = uniqueId()
-		reply.WorkerId = workerId
-		m.workers[workerId] = &WorkerPeer{workerId, IDLE, make(chan bool), nil}
-		log.Println("Registered new worker", workerId)
-	} else {
-		// known worker
-		workerId = args.WorkerId
-		newState := args.State
-		if newState != UNCHANGED {
-			m.workers[workerId].state = newState
-		}
-		if newState == COMPLETED {
-			jobId := m.workers[workerId].job.Id
-			m.jobs[jobId].State = COMPLETED
-			log.Printf("Job %v has completed by worker %v\n", jobId, workerId)
-		}
-	}
-	//log.Println("Received heartbeat from worker", workerId)
-	worker := m.workers[workerId]
-	if worker.state != INPROGRESS {
-		job := m.pendingJob()
-		if job != nil {
-			job.State = INPROGRESS
-			job.Worker = workerId
-			worker.job = job
-			reply.Jobs = append(reply.Jobs, *worker.job)
-			worker.state = INPROGRESS
-			log.Printf("Assigned %v task %v on %v to worker %v\n", worker.job.Kind, worker.job.Id, worker.job.Data, workerId)
-		}
-	}
-	m.mu.Unlock()
-	worker.alive <- true
-	// log.Println("Sent reply", reply)
-	return nil
-}
-
-// find a available job to assign
-// treat map and reduce as two non-overlapping phase
-// only assign reduce jobs after map phase finished
-func (m *Master) pendingJob() *Job {
-	mapFinished := true
-	for _, v := range m.mapJobIds {
-		state := m.jobs[v].State
-		if state == IDLE {
-			return m.jobs[v]
-		}
-		if state != COMPLETED {
-			mapFinished = false
-		}
-	}
-	if !mapFinished {
-		return nil
-	}
-	log.Println("Map phase has been completed")
-	reduceFinished := true
-	for _, v := range m.reduceJobIds {
-		state := m.jobs[v].State
-		if state == IDLE {
-			return m.jobs[v]
-		}
-		if state != COMPLETED {
-			reduceFinished = false
-		}
-	}
-	if reduceFinished {
-		m.done = true
-	}
-	log.Println("Reduce phase has been completed")
-	//log.Println("Whole MapReduce program has been completed")
-	return nil
+	return m.reduceDone
 }
 
 //
@@ -165,35 +166,42 @@ func (m *Master) pendingJob() *Job {
 // nReduce is the number of reduce tasks to use.
 //
 func MakeMaster(files []string, nReduce int) *Master {
-	m := Master{sync.Mutex{}, int64(nReduce), map[int]*WorkerPeer{}, map[int]*Job{}, []int{}, []int{}, false}
-	for _, file := range files {
-		jobId := uniqueId()
-		m.mapJobIds = append(m.mapJobIds, jobId)
+	m := Master{
+		jobs:         map[int]*Job{},
+		mu:           sync.Mutex{},
+		mapState:     map[int]State{},
+		mapWorker:    map[int]int{},
+		mapDone:      false,
+		reduceState:  map[int]State{},
+		reduceWorker: map[int]int{},
+		reduceDone:   false,
+		workerTimer:  map[int]*time.Timer{},
+	}
+	for i, file := range files {
+		jobId := i + nReduce
 		m.jobs[jobId] = &Job{
-			jobId, JK_MAP, []FileSplit{{file, 0}}, -1, IDLE, nReduce,
+			jobId, JK_MAP, []FileSplit{{file, 0}}, nReduce,
 		}
+		m.mapState[jobId] = IDLE
 	}
 	for i := 0; i < nReduce; i += 1 {
 		jobId := i
-		m.reduceJobIds = append(m.reduceJobIds, jobId)
 		data := []FileSplit{}
-		for _, j := range m.mapJobIds {
-			// naming convention for intermediate files: "mr-X-Y"
-			// where X is the Map jobId, and Y is the reduce jobId
-			data = append(data, FileSplit{fmt.Sprintf("mr-%v-%v", j, i), 0})
+		for j := 0; j < len(files); j += 1 {
+			// "mr-X-Y": X is the Map jobId, and Y is the reduce jobId
+			data = append(data, FileSplit{fmt.Sprintf("mr-%v-%v", j+nReduce, i), 0})
 		}
 		m.jobs[jobId] = &Job{
-			jobId, JK_REDUCE, data, -1, IDLE, nReduce,
+			jobId, JK_REDUCE, data, nReduce,
 		}
+		m.reduceState[jobId] = IDLE
 	}
-	//for k, v := range m.jobs {
-	//	log.Println(k, v)
+
+	//for jobId, job :=range m.jobs {
+	//	log.Println(jobId, job)
 	//}
-	//log.Println("mapJobIds", m.mapJobIds)
-	//log.Println("reduceJobIds", m.reduceJobIds)
 
 	m.server()
-	go m.watchDog()
 
 	return &m
 }
