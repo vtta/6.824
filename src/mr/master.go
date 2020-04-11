@@ -14,10 +14,10 @@ import (
 type State int
 
 const (
-	UNCHANGED   State = 0
-	IDLE        State = 1
-	IN_PROGRESS State = 2
-	COMPLETED   State = 3
+	UNCHANGED  State = 0
+	IDLE       State = 1
+	INPROGRESS State = 2
+	COMPLETED  State = 3
 )
 
 func (s State) String() string {
@@ -26,7 +26,7 @@ func (s State) String() string {
 		return "unchanged"
 	case IDLE:
 		return "idle"
-	case IN_PROGRESS:
+	case INPROGRESS:
 		return "in-progress"
 	case COMPLETED:
 		return "completed"
@@ -102,7 +102,7 @@ func (m *Master) watchDog() {
 			case <-v.alive:
 				break
 			default:
-				if m.jobs[v.job.Id].State == IN_PROGRESS {
+				if m.jobs[v.job.Id].State == INPROGRESS {
 					m.jobs[v.job.Id].State = IDLE
 					log.Printf("Reset %v job %v of timeout worker %v\n", v.job.Kind, v.job.Id, k)
 				}
@@ -146,14 +146,14 @@ func (m *Master) Heartbeat(args HeartbeatArgs, reply *HeartbeatReply) error {
 	log.Println("Received heartbeat from worker", workerId)
 	worker := m.workers[workerId]
 	worker.alive <- true
-	if worker.state != IN_PROGRESS {
+	if worker.state != INPROGRESS {
 		job := m.pendingJob()
 		if job != nil {
-			job.State = IN_PROGRESS
+			job.State = INPROGRESS
 			job.Worker = workerId
 			worker.job = job
 			reply.Jobs = append(reply.Jobs, *worker.job)
-			worker.state = IN_PROGRESS
+			worker.state = INPROGRESS
 			log.Printf("Assigned %v task %v on %v to worker %v\n", worker.job.Kind, worker.job.Id, worker.job.Data, workerId)
 		}
 	}
