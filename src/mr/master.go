@@ -102,6 +102,10 @@ func (m *Master) watchDog() {
 			case <-v.alive:
 				break
 			default:
+				if m.jobs[v.job.Id].State == IN_PROGRESS {
+					m.jobs[v.job.Id].State = IDLE
+					log.Printf("Reset %v job %v of timeout worker %v\n", v.job.Kind, v.job.Id, k)
+				}
 				delete(m.workers, k)
 				log.Println("Deleted timeout worker", k)
 			}
@@ -139,7 +143,7 @@ func (m *Master) Heartbeat(args HeartbeatArgs, reply *HeartbeatReply) error {
 			log.Printf("Job %v has completed by worker %v\n", jobId, workerId)
 		}
 	}
-	log.Println("Received heart beat from worker", workerId)
+	log.Println("Received heartbeat from worker", workerId)
 	worker := m.workers[workerId]
 	worker.alive <- true
 	if worker.state != IN_PROGRESS {
@@ -153,6 +157,7 @@ func (m *Master) Heartbeat(args HeartbeatArgs, reply *HeartbeatReply) error {
 			log.Printf("Assigned %v task %v on %v to worker %v\n", worker.job.Kind, worker.job.Id, worker.job.Data, workerId)
 		}
 	}
+	// log.Println("Sent reply", reply)
 	return nil
 }
 
@@ -216,7 +221,7 @@ func MakeMaster(files []string, nReduce int) *Master {
 			data = append(data, FileSplit{fmt.Sprintf("mr-%v-%v", j, i), 0})
 		}
 		m.jobs[jobId] = &Job{
-			jobId, JK_MAP, data, -1, IDLE,
+			jobId, JK_REDUCE, data, -1, IDLE,
 		}
 	}
 	m.server()

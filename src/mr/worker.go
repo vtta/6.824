@@ -30,11 +30,11 @@ type MapFn func(string, string) []KeyValue
 type ReduceFn func(string, []string) string
 
 func doMap(fn MapFn, data []FileSplit) {
-
+	log.Printf("Begining execution of map job on %v\n", data)
 }
 
 func doReduce(fn ReduceFn, data []FileSplit) {
-
+	log.Printf("Begining execution of reduce job on %v\n", data)
 }
 
 //
@@ -43,11 +43,24 @@ func doReduce(fn ReduceFn, data []FileSplit) {
 func Worker(mapfn MapFn, reducefn ReduceFn) {
 	args := HeartbeatArgs{-1, IDLE}
 	reply := HeartbeatReply{}
-	call("Master.Heartbeat", args, &reply)
-	workerId := reply.WorkerId
 	jobs := make(chan Job)
 	done := make(chan bool)
 	shutdown := make(chan bool)
+	handleAssignedJob := func(reply HeartbeatReply) {
+		// log.Println("Got reply", reply)
+		for _, v := range reply.Jobs {
+			log.Printf("Received %v job %v on %v\n", v.Kind, v.Id, v.Data)
+		}
+		go func(reply HeartbeatReply) {
+			for _, v := range reply.Jobs {
+				jobs <- v
+			}
+		}(reply)
+	}
+	call("Master.Heartbeat", args, &reply)
+	workerId := reply.WorkerId
+	log.Println("Registered with id", workerId)
+	handleAssignedJob(reply)
 	// heartbeat thread
 	go func() {
 		args := HeartbeatArgs{}
@@ -60,11 +73,7 @@ func Worker(mapfn MapFn, reducefn ReduceFn) {
 				args = HeartbeatArgs{workerId, UNCHANGED}
 			}
 			call("Master.Heartbeat", args, &reply)
-			go func() {
-				for _, v := range reply.Jobs {
-					jobs <- v
-				}
-			}()
+			handleAssignedJob(reply)
 			if reply.Shutdown {
 				shutdown <- true
 			}
