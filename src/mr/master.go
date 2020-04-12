@@ -12,7 +12,6 @@ import (
 )
 
 type Master struct {
-	// immutable Job table
 	jobs map[int]*Job
 	mu   sync.Mutex
 	// need to be protected by mutex
@@ -38,10 +37,9 @@ func (m *Master) WorkerRegister(args WorkerRegisterArgs, reply *WorkerRegisterRe
 	// clean up guard
 	go func(worker int, timer <-chan time.Time) {
 		<-timer
-		log.Printf("[--] [%02v] worker disconnected\n", worker)
-		delete(m.workerTimer, worker)
 		m.mu.Lock()
 		defer m.mu.Unlock()
+		delete(m.workerTimer, worker)
 		for jobId, workerId := range m.mapWorker {
 			if workerId == worker {
 				m.mapState[jobId] = IDLE
@@ -56,13 +54,18 @@ func (m *Master) WorkerRegister(args WorkerRegisterArgs, reply *WorkerRegisterRe
 				log.Printf("[%02v] [%02v] job state rolled back\n", jobId, worker)
 			}
 		}
+		log.Printf("[--] [%02v] worker disconnected\n", worker)
 	}(worker, m.workerTimer[worker].C)
 	return nil
 }
 
 func (m *Master) Heartbeat(args HeartbeatArgs, reply *HeartbeatReply) error {
 	//log.Printf("[--] [%02v] heartbeat\n", args.WorkerId)
-	m.workerTimer[args.WorkerId].Reset(time.Second)
+	timer, ok := m.workerTimer[args.WorkerId]
+	if !ok {
+		return fmt.Errorf("unkown worker")
+	}
+	timer.Reset(time.Second)
 	*reply = HeartbeatReply{m.Done()}
 	return nil
 }
@@ -72,27 +75,45 @@ func (m *Master) RequestJob(args RequestJobArgs, reply *RequestJobReply) error {
 	worker := args.WorkerId
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	for jobId, workerId := range m.mapWorker {
-		if workerId == worker {
-			m.mapState[jobId] = COMPLETED
-			delete(m.mapWorker, jobId)
-			log.Printf("[%02v] [%02v] Job finished\n", jobId, worker)
-		}
-	}
-	for jobId, workerId := range m.reduceWorker {
-		if workerId == worker {
-			m.reduceState[jobId] = COMPLETED
-			delete(m.reduceWorker, jobId)
-			log.Printf("[%02v] [%02v] Job finished\n", jobId, worker)
-		}
-	}
 	job := m.assignJob(worker)
 	if job != nil {
 		*reply = RequestJobReply{true, *job}
-		log.Printf("[%02v] [%02v] Job assigned\n", job.Id, worker)
+		log.Printf("[%02v] [%02v] assigned\n", job.Id, worker)
 	} else {
 		*reply = RequestJobReply{false, Job{}}
 	}
+	return nil
+}
+
+func (m *Master) HandInJob(args HandInJobArgs, reply *HandInJobReply) error {
+	jobId := args.JobId
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	switch m.jobs[jobId].Kind {
+	case JK_MAP:
+		_, ok := m.mapWorker[jobId]
+		if !ok {
+			return fmt.Errorf("illegal job hand-in")
+		}
+		delete(m.mapWorker, jobId)
+		m.mapState[jobId] = COMPLETED
+		for _, split := range args.Output {
+			var mapId, reduceId int
+			n, err := fmt.Sscanf(split.Name, "mr-%d-%d", &mapId, &reduceId)
+			if n != 2 || err != nil {
+				return fmt.Errorf("ill-formed output files")
+			}
+			m.jobs[reduceId].Data = append(m.jobs[reduceId].Data, split)
+		}
+	case JK_REDUCE:
+		_, ok := m.reduceWorker[jobId]
+		if !ok {
+			return fmt.Errorf("illegal job hand-in")
+		}
+		delete(m.reduceWorker, jobId)
+		m.reduceState[jobId] = COMPLETED
+	}
+	log.Printf("[%02v] [%02v] finished\n", jobId, args.WorkerId)
 	return nil
 }
 
@@ -186,13 +207,8 @@ func MakeMaster(files []string, nReduce int) *Master {
 	}
 	for i := 0; i < nReduce; i += 1 {
 		jobId := i
-		data := []FileSplit{}
-		for j := 0; j < len(files); j += 1 {
-			// "mr-X-Y": X is the Map jobId, and Y is the reduce jobId
-			data = append(data, FileSplit{fmt.Sprintf("mr-%v-%v", j+nReduce, i), 0})
-		}
 		m.jobs[jobId] = &Job{
-			jobId, JK_REDUCE, data, nReduce,
+			jobId, JK_REDUCE, []FileSplit{}, nReduce,
 		}
 		m.reduceState[jobId] = IDLE
 	}

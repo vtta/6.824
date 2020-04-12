@@ -41,6 +41,15 @@ type RequestJobReply struct {
 	Job    Job
 }
 
+type HandInJobArgs struct {
+	WorkerId int
+	JobId    int
+	Output   []FileSplit
+}
+
+type HandInJobReply struct {
+}
+
 type MapFn func(string, string) []KeyValue
 type ReduceFn func(string, []string) string
 

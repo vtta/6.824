@@ -8,8 +8,9 @@ import (
 	"time"
 )
 
-func doMap(fn MapFn, data []FileSplit, nReduce int, mapId int) {
-	log.Printf("Begining execution of map Job %v\n", mapId)
+func doMap(fn MapFn, data []FileSplit, nReduce int, mapId int) []FileSplit {
+	//log.Printf("begin execution of map Job %v\n", mapId)
+	output := []FileSplit{}
 	for _, split := range data {
 		file, err := os.Open(split.Name)
 		if err != nil {
@@ -28,29 +29,35 @@ func doMap(fn MapFn, data []FileSplit, nReduce int, mapId int) {
 		for reduceId, kvs := range intermediate {
 			// "mr-X-Y": X is the Map jobId, and Y is the reduce jobId
 			filename := fmt.Sprintf("mr-%v-%v", mapId, reduceId)
-			file, err := os.Create(filename)
+			file, err := ioutil.TempFile(".", "mr-")
 			if err != nil {
-				log.Fatalln("cannot create", filename)
+				log.Fatalln("cannot create temporary file", file.Name())
 			}
 			content := encode(kvs)
 			//log.Println(filename, content[:8])
 			n, err := file.Write(content)
 			if err != nil || n != len(content) {
-				log.Fatalln("cannot write", filename)
+				log.Fatalln("cannot write", file.Name())
 			}
 			err = file.Close()
 			if err != nil {
-				log.Fatalln("cannot close", filename)
+				log.Fatalln("cannot close", file.Name())
 			}
+			err = os.Rename(file.Name(), filename)
+			if err != nil {
+				log.Fatalln("cannot rename to", filename)
+			}
+			output = append(output, FileSplit{filename, 0})
 		}
 	}
-	log.Printf("Finished execution of map Job %v\n", mapId)
-
+	//log.Printf("finished execution of map Job %v\n", mapId)
+	return output
 }
 
-func doReduce(fn ReduceFn, data []FileSplit, reduceId int) {
-	log.Printf("Begining execution of reduce Job %v\n", reduceId)
+func doReduce(fn ReduceFn, data []FileSplit, reduceId int) []FileSplit {
+	//log.Printf("begin execution of reduce Job %v\n", reduceId)
 	//log.Println(data, reduceId)
+	output := []FileSplit{}
 	intermediate := map[string][]string{}
 	for _, split := range data {
 		file, err := os.Open(split.Name)
@@ -69,9 +76,9 @@ func doReduce(fn ReduceFn, data []FileSplit, reduceId int) {
 		}
 	}
 	filename := fmt.Sprintf("mr-out-%v", reduceId)
-	file, err := os.Create(filename)
+	file, err := ioutil.TempFile(".", "mr-")
 	if err != nil {
-		log.Fatalln("cannot create", filename)
+		log.Fatalln("cannot create temporary file", file.Name())
 	}
 	for k, v := range intermediate {
 		fmt.Fprintf(file, "%v %v\n", k, fn(k, v))
@@ -80,8 +87,13 @@ func doReduce(fn ReduceFn, data []FileSplit, reduceId int) {
 	if err != nil {
 		log.Fatalln("cannot close", filename)
 	}
-	log.Printf("Finished execution of reduce Job %v\n", reduceId)
-
+	err = os.Rename(file.Name(), filename)
+	if err != nil {
+		log.Fatalln("cannot rename to", filename)
+	}
+	output = append(output, FileSplit{filename, 0})
+	//log.Printf("finished execution of reduce Job %v\n", reduceId)
+	return output
 }
 
 func callRegister() int {
@@ -114,12 +126,15 @@ func Worker(mapfn MapFn, reducefn ReduceFn) {
 			reply := RequestJobReply{}
 			call("Master.RequestJob", args, &reply)
 			if reply.HasJob {
+				output := []FileSplit{}
 				switch reply.Job.Kind {
 				case JK_MAP:
-					doMap(mapfn, reply.Job.Data, reply.Job.NReduce, reply.Job.Id)
+					output = doMap(mapfn, reply.Job.Data, reply.Job.NReduce, reply.Job.Id)
 				case JK_REDUCE:
-					doReduce(reducefn, reply.Job.Data, reply.Job.Id)
+					output = doReduce(reducefn, reply.Job.Data, reply.Job.Id)
 				}
+				handInReply := HandInJobReply{}
+				call("Master.HandInJob", HandInJobArgs{workerId, reply.Job.Id, output}, &handInReply)
 			} else {
 				time.Sleep(100 * time.Millisecond)
 			}
