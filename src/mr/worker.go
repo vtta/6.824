@@ -16,7 +16,10 @@ func doMap(fn MapFn, data []FileSplit, nReduce int, mapId int) []FileSplit {
 		if err != nil {
 			log.Fatalln("cannot open", split.Name)
 		}
-		file.Seek(split.Offset, 0)
+		_, err = file.Seek(split.Offset, 0)
+		if err != nil {
+			log.Fatalln("cannot seek", split.Name)
+		}
 		content, err := ioutil.ReadAll(file)
 		if err != nil {
 			log.Fatalln("cannot read", split.Name)
@@ -31,7 +34,7 @@ func doMap(fn MapFn, data []FileSplit, nReduce int, mapId int) []FileSplit {
 			filename := fmt.Sprintf("mr-%v-%v", mapId, reduceId)
 			file, err := ioutil.TempFile(".", "mr-")
 			if err != nil {
-				log.Fatalln("cannot create temporary file", file.Name())
+				log.Fatalln("cannot create temporary file")
 			}
 			content := encode(kvs)
 			//log.Println(filename, content[:8])
@@ -64,7 +67,10 @@ func doReduce(fn ReduceFn, data []FileSplit, reduceId int) []FileSplit {
 		if err != nil {
 			log.Fatalln("cannot open", split.Name)
 		}
-		file.Seek(split.Offset, 0)
+		_, err = file.Seek(split.Offset, 0)
+		if err != nil {
+			log.Fatalln("cannot seek", split.Name)
+		}
 		content, err := ioutil.ReadAll(file)
 		if err != nil {
 			log.Fatalln("cannot read", split.Name)
@@ -78,10 +84,14 @@ func doReduce(fn ReduceFn, data []FileSplit, reduceId int) []FileSplit {
 	filename := fmt.Sprintf("mr-out-%v", reduceId)
 	file, err := ioutil.TempFile(".", "mr-")
 	if err != nil {
-		log.Fatalln("cannot create temporary file", file.Name())
+		log.Fatalln("cannot create temporary file")
 	}
 	for k, v := range intermediate {
-		fmt.Fprintf(file, "%v %v\n", k, fn(k, v))
+		r := fn(k, v)
+		_, err := fmt.Fprintf(file, "%v %v\n", k, r)
+		if err != nil {
+			log.Printf("cannot write output '%v %v'\n", k, r)
+		}
 	}
 	err = file.Close()
 	if err != nil {
