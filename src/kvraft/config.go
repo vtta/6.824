@@ -1,6 +1,6 @@
 package kvraft
 
-import "../labrpc"
+import "labrpc"
 import "testing"
 import "os"
 
