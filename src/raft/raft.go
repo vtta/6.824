@@ -168,23 +168,29 @@ func (rf *Raft) readPersist(data []byte) {
 }
 
 func getElectionTimeout() time.Duration {
-	return time.Duration(rand.Int()%500+500) * time.Millisecond
+	return time.Duration(rand.Int()%200+400) * time.Millisecond
+}
+
+func getHeartbeatTimeout() time.Duration {
+	return 200 * time.Millisecond
 }
 
 func (rf *Raft) beginElection() {
 	rf.mu.Lock()
 	rf.curTerm += 1
-	log.Printf("[%02v] [%v] begin election\n", rf.curTerm, rf.me)
-	candidateTerm := rf.curTerm
 	rf.votedFor = &rf.me
 	rf.timer.Reset(getElectionTimeout())
 	rf.state = CANDIDATE
+
+	args := RequestVoteArgs{rf.curTerm, rf.me, rf.commitIndex, rf.log[rf.commitIndex].Term}
 	me := rf.me
+	candidateTerm := rf.curTerm
 	totalPeers := len(rf.peers)
+
+	log.Printf("[%03v] [%v] begin election\n", candidateTerm, me)
 	votesNeed := totalPeers/2 + 1
 	votingCh := make(chan bool, totalPeers)
 	terminateCh := make(chan bool, totalPeers)
-	args := RequestVoteArgs{rf.curTerm, rf.me, rf.commitIndex, rf.log[rf.commitIndex].Term}
 	rf.mu.Unlock()
 
 	for peerId := 0; peerId < totalPeers; peerId += 1 {
@@ -192,30 +198,30 @@ func (rf *Raft) beginElection() {
 			continue
 		}
 		go func(server int) {
-			rf.mu.Lock()
-			defer rf.mu.Unlock()
 			reply := RequestVoteReply{}
-			log.Printf("[%02v] [%v] requesting vote form %v\n", rf.curTerm, rf.me, server)
+			log.Printf("[%03v] [%v] request vote from %v\n", candidateTerm, me, server)
 			ok := rf.sendRequestVote(server, &args, &reply)
-			if !ok {
+			if !ok || !reply.VoteGranted {
 				votingCh <- false
 				return
 			}
+			rf.mu.Lock()
+			defer rf.mu.Unlock()
 			if reply.Term > rf.curTerm {
-				rf.curTerm = reply.Term
 				rf.state = FOLLOWER
+				rf.curTerm = reply.Term
+				rf.votedFor = nil
 				votingCh <- false
 				terminateCh <- true
+				log.Printf("[%03v] [%v] saw higher term %v, setpping down\n", candidateTerm, me, reply.Term)
 				return
 			}
 			votingCh <- true
-			log.Printf("[%02v] [%v] got vote form %v\n", rf.curTerm, rf.me, server)
+			log.Printf("[%03v] [%v] got vote from %v\n", candidateTerm, me, server)
 		}(peerId)
 	}
 
-	yes := 1
-	votes := 1
-	for {
+	for yes, votes := 1, 1; ; {
 		select {
 		case <-terminateCh:
 			return
@@ -228,7 +234,7 @@ func (rf *Raft) beginElection() {
 				rf.mu.Lock()
 				if rf.state == CANDIDATE && candidateTerm == rf.curTerm {
 					rf.state = LEADER
-					log.Printf("[%02v] [%v] won the election\n", rf.curTerm, rf.me)
+					log.Printf("[%03v] [%v] won the election with %v/%v votes\n", rf.curTerm, rf.me, yes, votes)
 					rf.timer.Reset(0)
 				}
 				rf.mu.Unlock()
@@ -245,33 +251,51 @@ func (rf *Raft) beginReplication() {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 
-	rf.timer.Reset(100 * time.Millisecond)
 	args := AppendEntriesArgs{rf.curTerm, rf.me, 0, nil, 0}
 	for peerId := range rf.peers {
 		if peerId == rf.me {
 			continue
 		}
-		//log.Printf("[%02v] [%v] sending heartbeat to %v\n", rf.curTerm, rf.me, peerId)
-		rf.sendAppendEntries(peerId, &args, &AppendEntriesReply{})
+		//log.Printf("[%03v] [%v] sending heartbeat to %v\n", rf.curTerm, rf.me, peerId)
+		reply := AppendEntriesReply{}
+		rf.sendAppendEntries(peerId, &args, &reply)
+		if reply.Term > rf.curTerm {
+			rf.state = FOLLOWER
+			rf.curTerm = reply.Term
+			return
+		}
 	}
+}
+
+func (rf *Raft) logMoreComplete(peerLastLogIndex, peerLastLogTerm int) bool {
+	LastLogIndex, LastLogTerm := rf.commitIndex, rf.log[rf.commitIndex].Term
+	return LastLogTerm > peerLastLogTerm ||
+		(LastLogTerm == peerLastLogTerm && LastLogIndex > peerLastLogIndex)
 }
 
 func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
+	log.Printf("[%03v] [%v] received RequestVote from %v term %v\n", rf.curTerm, rf.me, args.CandidateId, args.Term)
+
+	if args.Term > rf.curTerm {
+		rf.state = FOLLOWER
+		rf.curTerm = args.Term
+		rf.votedFor = nil
+		rf.timer.Reset(getElectionTimeout())
+	}
 
 	granted := true
 	if args.Term < rf.curTerm || (rf.votedFor != nil && *rf.votedFor != args.CandidateId) {
 		granted = false
-	} else {
-		LastLogIndex, LastLogTerm := rf.commitIndex, rf.log[rf.commitIndex].Term
-		moreComplete := LastLogTerm > args.LastLogTerm ||
-			(LastLogTerm == args.LastLogTerm && LastLogIndex > args.LastLogIndex)
-		if moreComplete {
-			granted = false
-		}
+	}
+	if rf.logMoreComplete(args.LastLogIndex, args.LastLogTerm) {
+		granted = false
 	}
 
+	if granted {
+		rf.votedFor = &args.CandidateId
+	}
 	reply.Term = rf.curTerm
 	reply.VoteGranted = granted
 }
@@ -279,9 +303,14 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
-	//log.Printf("[%02v] [%v] recevied heartbeat from %v\n", rf.curTerm, rf.me, args.LeaderId)
-	rf.curTerm = args.Term
+	log.Printf("[%03v] [%v] received AppendEntries from %v term %v\n", rf.curTerm, rf.me, args.LeaderId, args.Term)
 	rf.timer.Reset(getElectionTimeout())
+
+	if args.Term > rf.curTerm {
+		rf.curTerm = args.Term
+		rf.state = FOLLOWER
+		rf.votedFor = nil
+	}
 	success := true
 	if args.Term < rf.curTerm {
 		success = false
@@ -428,9 +457,13 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 func (rf *Raft) Kill() {
 	atomic.StoreInt32(&rf.dead, 1)
 	// Your code here, if desired.
-	rf.mu.Lock()
-	defer rf.mu.Unlock()
-	rf.done <- true
+	once := sync.Once{}
+	once.Do(func() {
+		rf.mu.Lock()
+		defer rf.mu.Unlock()
+		close(rf.done)
+		log.Printf("[%03v] [%v] server killed\n", rf.curTerm, rf.me)
+	})
 }
 
 func (rf *Raft) killed() bool {
@@ -458,6 +491,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.applyCh = applyCh
 	rf.timer = time.NewTimer(getElectionTimeout())
 	rf.log = map[int]LogEntry{0: {}}
+	rf.done = make(chan bool)
 
 	// Your initialization code here (2A, 2B, 2C).
 
@@ -473,10 +507,18 @@ func Make(peers []*labrpc.ClientEnd, me int,
 				if !ok {
 					return
 				}
-				if _, isLeader := rf.GetState(); isLeader {
+				rf.mu.Lock()
+				isLeader := rf.state == LEADER
+				votedFor := rf.votedFor
+				rf.mu.Unlock()
+				if isLeader {
+					rf.timer.Reset(getHeartbeatTimeout())
 					go rf.beginReplication()
 				} else {
-					go rf.beginElection()
+					rf.timer.Reset(getElectionTimeout())
+					if votedFor == nil || *votedFor == me {
+						go rf.beginElection()
+					}
 				}
 			}
 
