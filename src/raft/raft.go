@@ -102,7 +102,7 @@ type Raft struct {
 
 func logIndexSorted(log map[int]LogEntry) []int {
 	keys := []int{}
-	for k, _ := range log {
+	for k := range log {
 		keys = append(keys, k)
 	}
 	sort.Ints(keys)
@@ -164,11 +164,12 @@ func (rf *Raft) leaderElection() {
 func (rf *Raft) logReplication() {
 	rf.mu.Lock()
 	RPrintf(rf.currentTerm, rf.me, rf.state, "==== log replication ====")
+	stale := rf.state != LEADER
 	rf.mu.Unlock()
-	for !rf.killed() {
+	for !rf.killed() && !stale {
 		rf.mu.Lock()
 		if rf.state == LEADER {
-			for i, _ := range rf.peers {
+			for i := range rf.peers {
 				if i == rf.me {
 					continue
 				}
@@ -183,6 +184,8 @@ func (rf *Raft) logReplication() {
 					rf.commitIndex,
 				})
 			}
+		} else {
+			stale = true
 		}
 		rf.mu.Unlock()
 		time.Sleep(HEARTBEATTIMEOUT)
@@ -474,7 +477,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
 
-	electionTimeout := time.Duration(rand.Int()%400+400) * time.Millisecond
+	electionTimeout := time.Duration(rand.Int()%500+500) * time.Millisecond
 	go func() {
 		for !rf.killed() {
 			time.Sleep(GUARDTIMEOUT)
