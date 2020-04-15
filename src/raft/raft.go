@@ -419,12 +419,10 @@ func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs) bool {
 	RPrintf(rf.currentTerm, rf.me, rf.state, "recv AppendEntries reply %v from %v", reply, server)
 	// reply.Term == args.Term must be true here, since term increase monotonically
 	if reply.Success {
-		if len(args.Entries) > 0 {
-			indices := logIndexSorted(args.Entries)
-			high := indices[len(indices)-1]
-			rf.nextIndex[server] = high + 1
-			rf.matchIndex[server] = high
-		}
+		indices := append([]int{args.PrevLogIndex}, logIndexSorted(args.Entries)...)
+		high := indices[len(indices)-1]
+		rf.nextIndex[server] = high + 1
+		rf.matchIndex[server] = high
 	} else {
 		rf.nextIndex[server] -= 1
 	}
