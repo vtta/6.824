@@ -382,7 +382,11 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs) bool {
 	rf.mu.Lock()
 	RPrintf(rf.currentTerm, rf.me, rf.state, "send RequestVote args %v to %v", args, server)
+	stale := rf.state != CANDIDATE
 	rf.mu.Unlock()
+	if stale {
+		return false
+	}
 	reply := RequestVoteReply{}
 	ok := rf.peers[server].Call("Raft.RequestVote", args, &reply)
 	if !ok || reply.Term < args.Term {
@@ -403,7 +407,11 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs) bool {
 func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs) bool {
 	rf.mu.Lock()
 	RPrintf(rf.currentTerm, rf.me, rf.state, "send AppendEntries args %v to %v", omittedAEA(args), server)
+	stale := rf.state != LEADER
 	rf.mu.Unlock()
+	if stale {
+		return false
+	}
 	reply := AppendEntriesReply{}
 	ok := rf.peers[server].Call("Raft.AppendEntries", args, &reply)
 	// sending failed or stale reply
@@ -426,6 +434,14 @@ func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs) bool {
 		rf.matchIndex[server] = high
 	} else {
 		rf.nextIndex[server] -= 1
+		// not fully replicated, retry
+		if maxLogIndex(rf.log) >= rf.nextIndex[server] {
+			entries := args.Entries
+			prevLogIndex := rf.nextIndex[server]
+			prevLogTerm := rf.log[rf.nextIndex[server]].Term
+			entries[prevLogIndex] = rf.log[prevLogIndex]
+			go rf.sendAppendEntries(server, &AppendEntriesArgs{rf.currentTerm, rf.me, prevLogIndex, prevLogTerm, entries, rf.commitIndex})
+		}
 	}
 	RPrintf(rf.currentTerm, rf.me, rf.state, "server %v nextIndex %v matchIndex %v", server, rf.nextIndex[server], rf.matchIndex[server])
 	return reply.Success
