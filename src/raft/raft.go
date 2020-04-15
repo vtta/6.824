@@ -285,7 +285,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		lis := logIndexSorted(rf.log)
 		lli := lis[len(lis)-1]
 		llt := rf.log[lli].Term
-		if llt > args.LastLogTerm || (llt == args.LastLogTerm && lli >= args.LastLogIndex) {
+		if args.LastLogTerm > llt || (args.LastLogTerm == llt && args.LastLogIndex >= lli) {
 			reply.VoteGranted = true
 			rf.votedFor = &args.CandidateId
 			rf.timeoutBegin = time.Now()
