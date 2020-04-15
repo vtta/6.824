@@ -61,8 +61,7 @@ func (rf *Raft) stepDown(term int) {
 }
 
 func (rf *Raft) electionDriver(electionTimeout time.Duration) {
-	for !rf.killed() {
-		time.Sleep(GUARDTIMEOUT)
+	for ; !rf.killed(); time.Sleep(GUARDTIMEOUT) {
 		rf.mu.Lock()
 		if time.Now().Sub(rf.timeoutBegin) > electionTimeout {
 			switch rf.state {
@@ -80,7 +79,7 @@ func (rf *Raft) electionDriver(electionTimeout time.Duration) {
 }
 
 func (rf *Raft) logApplier(applyCh chan ApplyMsg) {
-	for !rf.killed() {
+	for ; !rf.killed(); time.Sleep(GUARDTIMEOUT) {
 		rf.mu.Lock()
 		if rf.commitIndex > rf.lastApplied {
 			rf.lastApplied += 1
@@ -90,20 +89,20 @@ func (rf *Raft) logApplier(applyCh chan ApplyMsg) {
 			RPrintf(rf.currentTerm, rf.me, rf.state, "log applied %v", omittedLogEntry(rf.log, rf.lastApplied))
 		}
 		rf.mu.Unlock()
-		time.Sleep(GUARDTIMEOUT)
 	}
 }
 
-func (rf *Raft) commitLogWatcher() {
+func (rf *Raft) logCommitter() {
 	rf.mu.Lock()
 	stale := rf.state != LEADER
 	npeers := len(rf.peers)
 	rf.mu.Unlock()
-	for !rf.killed() && !stale {
+
+	for ; !rf.killed() && !stale; time.Sleep(GUARDTIMEOUT) {
 		rf.mu.Lock()
 		if rf.state == LEADER {
 			n := rf.commitIndex + 1
-			if l, ok := rf.log[n]; ok && l.Term == rf.currentTerm {
+			if e, ok := rf.log[n]; ok && e.Term == rf.currentTerm {
 				for i, replicas := 0, 1; i < npeers; i += 1 {
 					if i == rf.me {
 						continue
@@ -122,7 +121,6 @@ func (rf *Raft) commitLogWatcher() {
 			stale = true
 		}
 		rf.mu.Unlock()
-		time.Sleep(GUARDTIMEOUT)
 	}
 }
 
@@ -175,7 +173,6 @@ func (rf *Raft) leaderElection() {
 func (rf *Raft) logReplication() {
 	rf.mu.Lock()
 	RPrintf(rf.currentTerm, rf.me, rf.state, "==== log replication ====")
-
 	indices := logIndexSorted(rf.log)
 	npeers := len(rf.peers)
 	for i := 0; i < npeers; i += 1 {
@@ -186,10 +183,10 @@ func (rf *Raft) logReplication() {
 		rf.matchIndex[i] = 0
 	}
 	stale := rf.state != LEADER
-	go rf.commitLogWatcher()
+	go rf.logCommitter()
 	rf.mu.Unlock()
 
-	for !rf.killed() && !stale {
+	for ; !rf.killed() && !stale; time.Sleep(HEARTBEATTIMEOUT) {
 		rf.mu.Lock()
 		if rf.state == LEADER {
 			for i := range rf.peers {
@@ -199,11 +196,11 @@ func (rf *Raft) logReplication() {
 				prevLogIndex := rf.nextIndex[i] - 1
 				prevLogTerm := rf.log[prevLogIndex].Term
 				entries := map[int]LogEntry{}
-				for j := prevLogIndex + 1; ; j += 1 {
-					if e, ok := rf.log[j]; ok {
-						entries[j] = e
-					} else {
-						break
+				indices := logIndexSorted(rf.log)
+				// maybe could support holes in the log?
+				for _, idx := range indices {
+					if idx > prevLogIndex {
+						entries[idx] = rf.log[idx]
 					}
 				}
 				args := AppendEntriesArgs{
@@ -222,7 +219,6 @@ func (rf *Raft) logReplication() {
 			stale = true
 		}
 		rf.mu.Unlock()
-		time.Sleep(HEARTBEATTIMEOUT)
 	}
 }
 
