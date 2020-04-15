@@ -101,19 +101,20 @@ func (rf *Raft) logCommitter() {
 	for ; !rf.killed() && !stale; time.Sleep(GUARDTIMEOUT) {
 		rf.mu.Lock()
 		if rf.state == LEADER {
-			n := rf.commitIndex + 1
-			if e, ok := rf.log[n]; ok && e.Term == rf.currentTerm {
-				for i, replicas := 0, 1; i < npeers; i += 1 {
-					if i == rf.me {
-						continue
-					}
-					if rf.matchIndex[i] >= n {
-						replicas += 1
-					}
-					if replicas > npeers/2 {
-						rf.commitIndex = n
-						RPrintf(rf.currentTerm, rf.me, rf.state, "log replicated %v", omittedLogEntry(rf.log, n))
-						break
+			for n := rf.commitIndex + 1; n <= maxLogIndex(rf.log); n += 1 {
+				if e, ok := rf.log[n]; ok && e.Term == rf.currentTerm {
+					for i, replicas := 0, 1; i < npeers; i += 1 {
+						if i == rf.me {
+							continue
+						}
+						if rf.matchIndex[i] >= n {
+							replicas += 1
+						}
+						if replicas > npeers/2 {
+							rf.commitIndex = n
+							RPrintf(rf.currentTerm, rf.me, rf.state, "log replicated %v", omittedLogEntry(rf.log, n))
+							break
+						}
 					}
 				}
 			}
@@ -173,13 +174,13 @@ func (rf *Raft) leaderElection() {
 func (rf *Raft) logReplication() {
 	rf.mu.Lock()
 	RPrintf(rf.currentTerm, rf.me, rf.state, "==== log replication ====")
-	indices := logIndexSorted(rf.log)
+	maxLogIndex := maxLogIndex(rf.log)
 	npeers := len(rf.peers)
 	for i := 0; i < npeers; i += 1 {
 		if i == rf.me {
 			continue
 		}
-		rf.nextIndex[i] = indices[len(indices)-1] + 1
+		rf.nextIndex[i] = maxLogIndex + 1
 		rf.matchIndex[i] = 0
 	}
 	stale := rf.state != LEADER
@@ -453,8 +454,7 @@ func (rf *Raft) Start(command interface{}) (index int, term int, isLeader bool) 
 	isLeader = true
 
 	// Your code here (2B).
-	indices := logIndexSorted(rf.log)
-	index = indices[len(indices)-1] + 1
+	index = maxLogIndex(rf.log) + 1
 	term = rf.currentTerm
 	rf.log[index] = LogEntry{term, command}
 

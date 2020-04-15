@@ -118,6 +118,11 @@ func logIndexSorted(log map[int]LogEntry) []int {
 	return ret
 }
 
+func maxLogIndex(log map[int]LogEntry) int {
+	indices := logIndexSorted(log)
+	return indices[len(indices)-1]
+}
+
 func omittedLogEntry(log map[int]LogEntry, idx int) struct{ Index, Term int } {
 	return struct{ Index, Term int }{idx, log[idx].Term}
 }
