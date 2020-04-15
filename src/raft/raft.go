@@ -391,7 +391,7 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs) bool {
 	defer rf.mu.Unlock()
 	if reply.Term > rf.currentTerm {
 		RPrintf(rf.currentTerm, rf.me, rf.state, "saw term %v, stepping down", reply.Term)
-		rf.stepDown(args.Term)
+		rf.stepDown(reply.Term)
 		return false
 	}
 	// reply.Term == args.Term must be true here, since term increase monotonically
@@ -413,7 +413,7 @@ func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs) bool {
 	defer rf.mu.Unlock()
 	if reply.Term > rf.currentTerm {
 		RPrintf(rf.currentTerm, rf.me, rf.state, "saw term %v, stepping down", reply.Term)
-		rf.stepDown(args.Term)
+		rf.stepDown(reply.Term)
 		return false
 	}
 	RPrintf(rf.currentTerm, rf.me, rf.state, "recv AppendEntries reply %v from %v", reply, server)
