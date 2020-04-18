@@ -81,12 +81,11 @@ func (rf *Raft) electionDriver(electionTimeout time.Duration) {
 func (rf *Raft) logApplier(applyCh chan ApplyMsg) {
 	for ; !rf.killed(); time.Sleep(GUARDTIMEOUT) {
 		rf.mu.Lock()
-		if rf.commitIndex > rf.lastApplied {
-			rf.lastApplied += 1
-			go func(msg ApplyMsg) {
-				applyCh <- msg
-			}(ApplyMsg{true, rf.log[rf.lastApplied].Command, rf.lastApplied})
-			RPrintf(rf.currentTerm, rf.me, rf.state, "log applied %v", omittedLogEntry(rf.log, rf.lastApplied))
+		for rf.commitIndex > rf.lastApplied {
+			apply := rf.lastApplied + 1
+			RPrintf(rf.currentTerm, rf.me, rf.state, "log applied %v", omittedLogEntry(rf.log, apply))
+			applyCh <- ApplyMsg{true, rf.log[apply].Command, apply}
+			rf.lastApplied = apply
 		}
 		rf.mu.Unlock()
 	}
@@ -194,33 +193,32 @@ func (rf *Raft) logReplication() {
 				if i == rf.me {
 					continue
 				}
-				prevLogIndex := rf.nextIndex[i] - 1
-				prevLogTerm := rf.log[prevLogIndex].Term
-				entries := map[int]LogEntry{}
-				indices := logIndexSorted(rf.log)
-				// maybe could support holes in the log?
-				for _, idx := range indices {
-					if idx > prevLogIndex {
-						entries[idx] = rf.log[idx]
-					}
-				}
-				args := AppendEntriesArgs{
-					rf.currentTerm,
-					rf.me,
-					prevLogIndex,
-					prevLogTerm,
-					entries,
-					rf.commitIndex,
-				}
-				go func(server int, args AppendEntriesArgs) {
-					rf.sendAppendEntries(server, &args)
-				}(i, args)
+				go rf.sendAppendEntries(i, rf.newAppendEntriesArg(i))
 			}
 		} else {
 			stale = true
 		}
 		rf.mu.Unlock()
 	}
+}
+
+func (rf *Raft) newAppendEntriesArg(server int) *AppendEntriesArgs {
+	entries := map[int]LogEntry{}
+	prevLogIndex := rf.nextIndex[server] - 1
+	prevLogTerm := rf.log[prevLogIndex].Term
+	// maybe could support holes in the log?
+	for _, idx := range logIndexSorted(rf.log) {
+		if idx > prevLogIndex {
+			entries[idx] = rf.log[idx]
+		}
+	}
+	return &AppendEntriesArgs{
+		rf.currentTerm,
+		rf.me,
+		prevLogIndex,
+		prevLogTerm,
+		entries,
+		rf.commitIndex}
 }
 
 // return currentTerm and whether this server
@@ -316,6 +314,14 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	if e, ok := rf.log[args.PrevLogIndex]; !ok || e.Term != args.PrevLogTerm {
 		reply.Success = false
 		//RPrintf(rf.currentTerm,rf.me,rf.state,"prev log entry does match, %v", rf.log)
+		// go back a term in the log for a possible matching entry
+		// discard empty entry or entries that has the same term as rejected entry
+		goBackAllowed := 0
+		for term := e.Term; !ok || e.Term == term; {
+			goBackAllowed += 1
+			e, ok = rf.log[args.PrevLogIndex-goBackAllowed]
+		}
+		reply.GoBackAllowed = goBackAllowed
 		return
 	}
 	// all entries before received log should match here, append new entries
@@ -433,14 +439,10 @@ func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs) bool {
 		rf.nextIndex[server] = high + 1
 		rf.matchIndex[server] = high
 	} else {
-		rf.nextIndex[server] -= 1
+		rf.nextIndex[server] -= reply.GoBackAllowed
 		// not fully replicated, retry
 		if maxLogIndex(rf.log) >= rf.nextIndex[server] {
-			entries := args.Entries
-			prevLogIndex := rf.nextIndex[server]
-			prevLogTerm := rf.log[rf.nextIndex[server]].Term
-			entries[prevLogIndex] = rf.log[prevLogIndex]
-			go rf.sendAppendEntries(server, &AppendEntriesArgs{rf.currentTerm, rf.me, prevLogIndex, prevLogTerm, entries, rf.commitIndex})
+			go rf.sendAppendEntries(server, rf.newAppendEntriesArg(server))
 		}
 	}
 	RPrintf(rf.currentTerm, rf.me, rf.state, "server %v nextIndex %v matchIndex %v", server, rf.nextIndex[server], rf.matchIndex[server])
