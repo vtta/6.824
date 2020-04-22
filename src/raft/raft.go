@@ -296,7 +296,7 @@ func (rf *Raft) readPersist(data []byte) {
 		rf.votedFor = nil
 	}
 
-	RPrintf(rf.currentTerm, rf.me, rf.state, "read voted %v votedFor %v log %v", rf.votedFor != nil, rf.votedFor, omittedLog(rf.log))
+	//RPrintf(rf.currentTerm, rf.me, rf.state, "read voted %v votedFor %v log %v", rf.votedFor != nil, rf.votedFor, omittedLog(rf.log))
 }
 
 func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
@@ -331,6 +331,8 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	defer rf.mu.Unlock()
 	//RPrintf(rf.currentTerm,rf.me,rf.state,"recv AppendEntries args %v",args)
 	// saw higher term
+	RPrintf(rf.currentTerm, rf.me, rf.state, "recv AppendEntries args %v", omittedAEA(args))
+	defer RPrintf(rf.currentTerm, rf.me, rf.state, "send AppendEntries reply %v", reply)
 	if args.Term > rf.currentTerm {
 		rf.stepDown(args.Term)
 	}
@@ -349,7 +351,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		// go back a term in the log for a possible matching entry
 		// discard empty entry or entries that has the same term as rejected entry
 		goBackAllowed := 0
-		for term := e.Term; !ok || e.Term == term; {
+		for term := e.Term; args.PrevLogIndex-goBackAllowed > 0 && (!ok || e.Term == term); {
 			goBackAllowed += 1
 			e, ok = rf.log[args.PrevLogIndex-goBackAllowed]
 		}
