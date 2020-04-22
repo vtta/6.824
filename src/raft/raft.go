@@ -67,9 +67,11 @@ func (rf *Raft) electionDriver(electionTimeout time.Duration) {
 			switch rf.state {
 			case FOLLOWER:
 				rf.state = CANDIDATE
-				go rf.leaderElection()
+				rf.currentTerm += 1
+				go rf.leaderElection(rf.currentTerm)
 			case CANDIDATE:
-				go rf.leaderElection()
+				rf.currentTerm += 1
+				go rf.leaderElection(rf.currentTerm)
 			case LEADER:
 			}
 			rf.timeoutBegin = time.Now()
@@ -91,15 +93,16 @@ func (rf *Raft) logApplier(applyCh chan ApplyMsg) {
 	}
 }
 
-func (rf *Raft) logCommitter() {
+func (rf *Raft) logCommitter(term int) {
 	rf.mu.Lock()
-	stale := rf.state != LEADER
+	stale := rf.state != LEADER || term != rf.currentTerm
 	npeers := len(rf.peers)
 	rf.mu.Unlock()
 
 	for ; !rf.killed() && !stale; time.Sleep(GUARDTIMEOUT) {
 		rf.mu.Lock()
-		if rf.state == LEADER {
+		stale = rf.state != LEADER || term != rf.currentTerm
+		if !stale {
 			for n := rf.commitIndex + 1; n <= maxLogIndex(rf.log); n += 1 {
 				if e, ok := rf.log[n]; ok && e.Term == rf.currentTerm {
 					for i, replicas := 0, 1; i < npeers; i += 1 {
@@ -117,25 +120,22 @@ func (rf *Raft) logCommitter() {
 					}
 				}
 			}
-		} else {
-			stale = true
 		}
 		rf.mu.Unlock()
 	}
 }
 
-func (rf *Raft) leaderElection() {
+func (rf *Raft) leaderElection(term int) {
 	rf.mu.Lock()
-	rf.currentTerm += 1
 	rf.votedFor = &rf.me
 	RPrintf(rf.currentTerm, rf.me, rf.state, "==== leader election ====")
 
-	electionTerm := rf.currentTerm
 	me := rf.me
 	npeers := len(rf.peers)
 	lis := logIndexSorted(rf.log)
 	lastLogIndex := lis[len(lis)-1]
 	lastLogTerm := rf.log[lastLogIndex].Term
+	stale := rf.state != CANDIDATE || term != rf.currentTerm
 	args := RequestVoteArgs{
 		rf.currentTerm,
 		rf.me,
@@ -153,24 +153,25 @@ func (rf *Raft) leaderElection() {
 		}
 	}
 
-	for voted, agreed := 1, 1; voted < npeers; voted += 1 {
+	for voted, agreed := 1, 1; !stale && voted < npeers; voted += 1 {
 		yes := <-votes
-		if yes {
-			agreed += 1
-		}
-		if agreed > npeers/2 {
-			rf.mu.Lock()
-			if rf.state == CANDIDATE && electionTerm == rf.currentTerm {
-				rf.state = LEADER
-				go rf.logReplication()
+		rf.mu.Lock()
+		stale = rf.state != CANDIDATE || term != rf.currentTerm
+		if !stale {
+			if yes {
+				agreed += 1
 			}
-			rf.mu.Unlock()
-			return
+			if agreed > npeers/2 {
+				rf.state = LEADER
+				go rf.logReplication(term)
+				stale = true
+			}
 		}
+		rf.mu.Unlock()
 	}
 }
 
-func (rf *Raft) logReplication() {
+func (rf *Raft) logReplication(term int) {
 	rf.mu.Lock()
 	RPrintf(rf.currentTerm, rf.me, rf.state, "==== log replication ====")
 	maxLogIndex := maxLogIndex(rf.log)
@@ -182,21 +183,20 @@ func (rf *Raft) logReplication() {
 		rf.nextIndex[i] = maxLogIndex + 1
 		rf.matchIndex[i] = 0
 	}
-	stale := rf.state != LEADER
-	go rf.logCommitter()
+	stale := rf.state != LEADER || term != rf.currentTerm
+	go rf.logCommitter(term)
 	rf.mu.Unlock()
 
 	for ; !rf.killed() && !stale; time.Sleep(HEARTBEATTIMEOUT) {
 		rf.mu.Lock()
-		if rf.state == LEADER {
+		stale = rf.state != LEADER || term != rf.currentTerm
+		if !stale {
 			for i := range rf.peers {
 				if i == rf.me {
 					continue
 				}
 				go rf.sendAppendEntries(i, rf.newAppendEntriesArg(i))
 			}
-		} else {
-			stale = true
 		}
 		rf.mu.Unlock()
 	}
@@ -440,6 +440,9 @@ func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs) bool {
 		rf.matchIndex[server] = high
 	} else {
 		rf.nextIndex[server] -= reply.GoBackAllowed
+		if rf.nextIndex[server] < 1 {
+			rf.nextIndex[server] = 1
+		}
 		// not fully replicated, retry
 		if maxLogIndex(rf.log) >= rf.nextIndex[server] {
 			go rf.sendAppendEntries(server, rf.newAppendEntriesArg(server))
