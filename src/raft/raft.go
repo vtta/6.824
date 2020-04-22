@@ -18,7 +18,10 @@ package raft
 //
 
 import (
+	"bytes"
+	"labgob"
 	"labrpc"
+	"log"
 	"math"
 	"math/rand"
 	"sync"
@@ -58,6 +61,7 @@ func (rf *Raft) stepDown(term int) {
 	rf.currentTerm = term
 	rf.state = FOLLOWER
 	rf.votedFor = nil
+	rf.persist()
 }
 
 func (rf *Raft) electionDriver(electionTimeout time.Duration) {
@@ -129,6 +133,7 @@ func (rf *Raft) leaderElection(term int) {
 	rf.mu.Lock()
 	rf.votedFor = &rf.me
 	RPrintf(rf.currentTerm, rf.me, rf.state, "==== leader election ====")
+	rf.persist()
 
 	me := rf.me
 	npeers := len(rf.peers)
@@ -236,36 +241,62 @@ func (rf *Raft) GetState() (int, bool) {
 // see paper's Figure 2 for a description of what should be persistent.
 //
 func (rf *Raft) persist() {
-	// Your code here (2C).
-	// Example:
-	// w := new(bytes.Buffer)
-	// e := labgob.NewEncoder(w)
-	// e.Encode(rf.xxx)
-	// e.Encode(rf.yyy)
-	// data := w.Bytes()
-	// rf.persister.SaveRaftState(data)
+	// caller should have been holding the lock while calling this function
+
+	buf := bytes.Buffer{}
+	encoder := labgob.NewEncoder(&buf)
+	if err := encoder.Encode(rf.currentTerm); err != nil {
+		log.Fatalln(err)
+	}
+	if rf.votedFor != nil {
+		if err := encoder.Encode(rf.votedFor); err != nil {
+			log.Fatalln(err)
+		}
+	} else {
+		if err := encoder.Encode(math.MinInt32); err != nil {
+			log.Fatalln(err)
+		}
+	}
+	if err := encoder.Encode(rf.log); err != nil {
+		log.Fatalln(err)
+	}
+	rf.persister.SaveRaftState(buf.Bytes())
+
+	RPrintf(rf.currentTerm, rf.me, rf.state, "save voted %v votedFor %v log %v", rf.votedFor != nil, rf.votedFor, omittedLog(rf.log))
 }
 
 //
 // restore previously persisted state.
 //
 func (rf *Raft) readPersist(data []byte) {
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+
+	rf.state = FOLLOWER
+	rf.nextIndex = make([]int, len(rf.peers))
+	rf.matchIndex = make([]int, len(rf.peers))
+
 	if data == nil || len(data) < 1 { // bootstrap without any state?
 		return
 	}
-	// Your code here (2C).
-	// Example:
-	// r := bytes.NewBuffer(data)
-	// d := labgob.NewDecoder(r)
-	// var xxx
-	// var yyy
-	// if d.Decode(&xxx) != nil ||
-	//    d.Decode(&yyy) != nil {
-	//   error...
-	// } else {
-	//   rf.xxx = xxx
-	//   rf.yyy = yyy
-	// }
+
+	buf := bytes.NewBuffer(data)
+	decoder := labgob.NewDecoder(buf)
+
+	if err := decoder.Decode(&rf.currentTerm); err != nil {
+		log.Fatalln(err)
+	}
+	if err := decoder.Decode(&rf.votedFor); err != nil {
+		log.Fatalln(err)
+	}
+	if err := decoder.Decode(&rf.log); err != nil {
+		log.Fatalln(err)
+	}
+	if *rf.votedFor < 0 {
+		rf.votedFor = nil
+	}
+
+	RPrintf(rf.currentTerm, rf.me, rf.state, "read voted %v votedFor %v log %v", rf.votedFor != nil, rf.votedFor, omittedLog(rf.log))
 }
 
 func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
@@ -288,6 +319,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 			reply.VoteGranted = true
 			rf.votedFor = &args.CandidateId
 			rf.timeoutBegin = time.Now()
+			rf.persist()
 			return
 		}
 	}
@@ -348,6 +380,10 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 			rf.log[idx] = args.Entries[idx]
 			lastNew = idx
 		}
+	}
+	// normal heartbeat RPC should not trigger a persist
+	if lastNew != math.MaxInt32 {
+		rf.persist()
 	}
 	if args.LeaderCommit > rf.commitIndex {
 		rf.commitIndex = MinInt(args.LeaderCommit, lastNew)
@@ -478,7 +514,7 @@ func (rf *Raft) Start(command interface{}) (index int, term int, isLeader bool) 
 	index = maxLogIndex(rf.log) + 1
 	term = rf.currentTerm
 	rf.log[index] = LogEntry{term, command}
-
+	rf.persist()
 	return
 }
 
@@ -520,13 +556,10 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.peers = peers
 	rf.persister = persister
 	rf.me = me
-	// Your initialization code here (2A, 2B, 2C).
-	rf.state = FOLLOWER
+
 	rf.timeoutBegin = time.Now()
 
 	rf.log = map[int]LogEntry{0: {}}
-	rf.nextIndex = make([]int, len(peers))
-	rf.matchIndex = make([]int, len(peers))
 
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
