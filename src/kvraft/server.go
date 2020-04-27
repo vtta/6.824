@@ -7,6 +7,7 @@ import (
 	"raft"
 	"sync"
 	"sync/atomic"
+	"time"
 )
 
 const Debug = 0
@@ -22,6 +23,9 @@ type Op struct {
 	// Your definitions here.
 	// Field names must start with capital letters,
 	// otherwise RPC will break.
+	Key   string
+	Value string
+	Op    string
 }
 
 type KVServer struct {
@@ -34,14 +38,71 @@ type KVServer struct {
 	maxraftstate int // snapshot if log grows this big
 
 	// Your definitions here.
+	leader  int
+	kvs     map[string]string
+	applied map[int]interface{}
 }
 
 func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
-	// Your code here.
+	kv.mu.Lock()
+	defer kv.mu.Unlock()
+	if _, leader := kv.rf.GetState(); !leader {
+		reply.Err = "not a leader"
+		return
+	}
+	if v, ok := kv.kvs[args.Key]; !ok {
+		reply.Err = "not found"
+	} else {
+		reply.Value = v
+		reply.Err = ""
+	}
 }
 
 func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
-	// Your code here.
+	kv.mu.Lock()
+	cmd := Op{args.Key, args.Value, args.Op}
+	idx, _, ok := kv.rf.Start(cmd)
+	if !ok {
+		reply.Err = "not a leader"
+		kv.mu.Unlock()
+		return
+	}
+
+	okCh := make(chan bool)
+	go func() {
+		t0 := time.Now()
+		for time.Since(t0) < time.Minute && !kv.killed() {
+			stale := false
+			kv.mu.Lock()
+			if v, ok := kv.applied[idx]; ok {
+				okCh <- v == cmd
+				delete(kv.applied, idx)
+				stale = true
+			}
+			kv.mu.Unlock()
+			if stale {
+				return
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+		okCh <- false
+	}()
+	kv.mu.Unlock()
+
+	if ok := <-okCh; !ok {
+		reply.Err = "failed"
+		return
+	}
+
+	kv.mu.Lock()
+	defer kv.mu.Unlock()
+	switch args.Op {
+	case "put":
+		kv.kvs[args.Key] = args.Value
+	case "append":
+		kv.kvs[args.Key] = kv.kvs[args.Key] + args.Value
+	}
+	reply.Err = ""
 }
 
 //
@@ -58,6 +119,7 @@ func (kv *KVServer) Kill() {
 	atomic.StoreInt32(&kv.dead, 1)
 	kv.rf.Kill()
 	// Your code here, if desired.
+	close(kv.applyCh)
 }
 
 func (kv *KVServer) killed() bool {
@@ -94,6 +156,16 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 	kv.rf = raft.Make(servers, me, persister, kv.applyCh)
 
 	// You may need initialization code here.
+	kv.kvs = map[string]string{}
+	kv.applied = map[int]interface{}{}
+
+	go func() {
+		for applied := range kv.applyCh {
+			if applied.CommandValid {
+				kv.applied[applied.CommandIndex] = applied.Command
+			}
+		}
+	}()
 
 	return kv
 }
